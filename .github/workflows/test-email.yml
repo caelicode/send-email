@@ -34,6 +34,7 @@ jobs:
             <p><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">
               View workflow run
             </a></p>
-          server_address: ${{ secrets.SMTP_SERVER || 'smtp.gmail.com' }}
-          server_port: ${{ secrets.SMTP_PORT || '587' }}
-          secure: 'false'
+          from: noreply@caelicode.com
+          server_address: smtp.resend.com
+          server_port: '465'
+          secure: 'true'
