@@ -1,0 +1,39 @@
+name: Test Email
+
+on:
+  workflow_dispatch:
+    inputs:
+      to:
+        description: 'Recipient email address for test'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  send-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Send test email
+        uses: ./
+        with:
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          to: ${{ inputs.to }}
+          subject: '[Test] send-email action — ${{ github.run_id }}'
+          body: |
+            This is an automated test from caelicode/send-email.
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          html: |
+            <p>This is an automated test from <strong>caelicode/send-email</strong>.</p>
+            <p><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">
+              View workflow run
+            </a></p>
+          server_address: ${{ secrets.SMTP_SERVER || 'smtp.gmail.com' }}
+          server_port: ${{ secrets.SMTP_PORT || '587' }}
+          secure: 'false'

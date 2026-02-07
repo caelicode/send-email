@@ -1,0 +1,66 @@
+name: Send Email
+description: >
+  Send emails from GitHub Actions via any SMTP server.
+  Works out of the box with Gmail, Outlook, SendGrid, Brevo, and other providers.
+author: caelicode
+
+branding:
+  icon: mail
+  color: blue
+
+inputs:
+  username:
+    description: SMTP username (also used as "from" address if "from" is not set)
+    required: true
+  password:
+    description: SMTP password or app-specific password
+    required: true
+  subject:
+    description: Email subject line
+    required: true
+  to:
+    description: Recipient email addresses (comma-separated)
+    required: true
+  from:
+    description: >
+      Sender address shown in the email.
+      Defaults to the "username" value if omitted.
+    required: false
+  cc:
+    description: CC recipients (comma-separated)
+    required: false
+  bcc:
+    description: BCC recipients (comma-separated)
+    required: false
+  body:
+    description: Plain-text body. At least one of "body" or "html" must be provided.
+    required: false
+  html:
+    description: HTML body. At least one of "body" or "html" must be provided.
+    required: false
+  reply_to:
+    description: Reply-To address
+    required: false
+  server_address:
+    description: SMTP server hostname
+    required: false
+    default: "smtp.gmail.com"
+  server_port:
+    description: SMTP server port (587 for STARTTLS, 465 for TLS)
+    required: false
+    default: "587"
+  secure:
+    description: >
+      Use TLS on connect (port 465). Set to "false" for STARTTLS (port 587).
+      Most providers use port 587 with secure=false — STARTTLS is negotiated
+      automatically by nodemailer.
+    required: false
+    default: "false"
+
+outputs:
+  message_id:
+    description: The Message-ID returned by the SMTP server after a successful send
+
+runs:
+  using: node20
+  main: dist/index.js
