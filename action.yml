@@ -1,7 +1,8 @@
 name: Send Email
 description: >
-  Send emails from GitHub Actions via any SMTP server.
-  Works out of the box with Gmail, Outlook, SendGrid, Brevo, and other providers.
+  Send feature-rich emails from GitHub Actions via any SMTP server.
+  Supports attachments, inline images, HTML, calendar invites, priority,
+  custom headers, email threading, and read receipts.
 author: caelicode
 
 branding:
@@ -23,7 +24,7 @@ inputs:
     required: true
   from:
     description: >
-      Sender address shown in the email.
+      Sender address. Supports display names: "Team Name" <noreply@domain.com>.
       Defaults to the "username" value if omitted.
     required: false
   cc:
@@ -40,6 +41,46 @@ inputs:
     required: false
   reply_to:
     description: Reply-To address
+    required: false
+  attachments:
+    description: >
+      File attachments. Two formats supported:
+        Simple — comma-separated file paths: "./report.pdf, ./data.csv"
+        Advanced (JSON array) — supports inline images via cid:
+          [{"path":"./logo.png","cid":"logo@company"},{"path":"./report.pdf"}]
+      Paths are resolved relative to the repository root (GITHUB_WORKSPACE).
+      URLs (http/https) are also accepted and will be fetched by nodemailer.
+    required: false
+  priority:
+    description: >
+      Email priority: "high", "normal", or "low".
+      Sets X-Priority and Importance headers.
+    required: false
+  headers:
+    description: >
+      Custom email headers as a JSON object.
+      Example: {"X-Entity-Ref-ID":"unique-id","List-Unsubscribe":"<mailto:unsub@domain.com>"}
+    required: false
+  ical:
+    description: >
+      Calendar invite. Accepts either a file path to an .ics file
+      or inline iCal content starting with BEGIN:VCALENDAR.
+      Sent as a calendar event attachment with method REQUEST.
+    required: false
+  read_receipt:
+    description: >
+      Email address to receive read receipts (Disposition-Notification-To header).
+      Note: read receipt support depends on the recipient's email client.
+    required: false
+  in_reply_to:
+    description: >
+      Message-ID of the email this is replying to, for threading.
+      Example: "<original-message-id@domain.com>"
+    required: false
+  references:
+    description: >
+      Space-separated Message-IDs for email thread references.
+      Example: "<msg-1@domain.com> <msg-2@domain.com>"
     required: false
   server_address:
     description: SMTP server hostname

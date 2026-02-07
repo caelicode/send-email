@@ -40979,10 +40979,15 @@ module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"6.10.1
 var __webpack_exports__ = {};
 /* harmony import */ var _actions_core__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(7484);
 /* harmony import */ var nodemailer__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(6002);
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2__ = __nccwpck_require__(9896);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3__ = __nccwpck_require__(6928);
+
+
 
 
 
 async function sendEmail() {
+  // --- Core inputs ---
   const serverAddress = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('server_address') || 'smtp.gmail.com';
   const serverPort = parseInt(_actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('server_port') || '587', 10);
   const secure = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('secure') === 'true';
@@ -40996,6 +41001,15 @@ async function sendEmail() {
   const body = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('body');
   const html = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('html');
   const replyTo = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('reply_to');
+
+  // --- New inputs ---
+  const attachments = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('attachments');
+  const priority = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('priority');
+  const headers = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('headers');
+  const ical = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('ical');
+  const readReceipt = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('read_receipt');
+  const inReplyTo = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('in_reply_to');
+  const references = _actions_core__WEBPACK_IMPORTED_MODULE_0__.getInput('references');
 
   // --- Input validation ---
   if (!to) {
@@ -41020,16 +41034,116 @@ async function sendEmail() {
     return;
   }
 
+  if (priority && !['high', 'normal', 'low'].includes(priority.toLowerCase())) {
+    _actions_core__WEBPACK_IMPORTED_MODULE_0__.setFailed(
+      `Invalid priority "${priority}". Must be "high", "normal", or "low".`
+    );
+    return;
+  }
+
+  // --- Parse attachments ---
+  // Accepts either:
+  //   Comma-separated file paths:  "./report.pdf, ./data.csv"
+  //   JSON array (advanced):       [{"path":"./logo.png","cid":"logo"},{"path":"./report.pdf"}]
+  let parsedAttachments;
+  if (attachments) {
+    try {
+      const trimmed = attachments.trim();
+      if (trimmed.startsWith('[')) {
+        parsedAttachments = JSON.parse(trimmed);
+        parsedAttachments = parsedAttachments.map((att) => {
+          if (typeof att === 'string') {
+            att = { path: att };
+          }
+          if (att.path && !att.path.startsWith('http')) {
+            const resolved = (0,path__WEBPACK_IMPORTED_MODULE_3__.resolve)(
+              process.env.GITHUB_WORKSPACE || '.',
+              att.path
+            );
+            if (!(0,fs__WEBPACK_IMPORTED_MODULE_2__.existsSync)(resolved)) {
+              throw new Error(
+                `Attachment not found: ${att.path} (resolved to ${resolved})`
+              );
+            }
+            att.path = resolved;
+            if (!att.filename) att.filename = (0,path__WEBPACK_IMPORTED_MODULE_3__.basename)(resolved);
+          }
+          return att;
+        });
+      } else {
+        parsedAttachments = trimmed
+          .split(',')
+          .map((p) => {
+            const filePath = p.trim();
+            if (!filePath) return null;
+
+            if (
+              filePath.startsWith('http://') ||
+              filePath.startsWith('https://')
+            ) {
+              return { href: filePath, filename: (0,path__WEBPACK_IMPORTED_MODULE_3__.basename)(filePath) };
+            }
+
+            const resolved = (0,path__WEBPACK_IMPORTED_MODULE_3__.resolve)(
+              process.env.GITHUB_WORKSPACE || '.',
+              filePath
+            );
+            if (!(0,fs__WEBPACK_IMPORTED_MODULE_2__.existsSync)(resolved)) {
+              throw new Error(
+                `Attachment not found: ${filePath} (resolved to ${resolved})`
+              );
+            }
+            return { path: resolved, filename: (0,path__WEBPACK_IMPORTED_MODULE_3__.basename)(resolved) };
+          })
+          .filter(Boolean);
+      }
+    } catch (error) {
+      _actions_core__WEBPACK_IMPORTED_MODULE_0__.setFailed(`Invalid attachments: ${error.message}`);
+      return;
+    }
+  }
+
+  // --- Parse custom headers ---
+  let parsedHeaders;
+  if (headers) {
+    try {
+      parsedHeaders = JSON.parse(headers);
+    } catch (error) {
+      _actions_core__WEBPACK_IMPORTED_MODULE_0__.setFailed(`Invalid headers JSON: ${error.message}`);
+      return;
+    }
+  }
+
+  // --- Parse iCal ---
+  // Accepts either inline iCal content (starts with BEGIN:VCALENDAR) or a file path.
+  let icalEvent;
+  if (ical) {
+    const trimmed = ical.trim();
+    if (trimmed.startsWith('BEGIN:VCALENDAR')) {
+      icalEvent = { content: trimmed, method: 'REQUEST' };
+    } else {
+      const resolved = (0,path__WEBPACK_IMPORTED_MODULE_3__.resolve)(
+        process.env.GITHUB_WORKSPACE || '.',
+        trimmed
+      );
+      if (!(0,fs__WEBPACK_IMPORTED_MODULE_2__.existsSync)(resolved)) {
+        _actions_core__WEBPACK_IMPORTED_MODULE_0__.setFailed(
+          `iCal file not found: ${trimmed} (resolved to ${resolved})`
+        );
+        return;
+      }
+      icalEvent = { content: (0,fs__WEBPACK_IMPORTED_MODULE_2__.readFileSync)(resolved, 'utf8'), method: 'REQUEST' };
+    }
+  }
+
   // --- Build transport ---
   try {
     const transportOptions = {
       host: serverAddress,
       port: serverPort,
-      secure: secure, // true = TLS on connect (465), false = STARTTLS (587)
+      secure: secure,
     };
 
-    // Only attach auth if credentials were actually provided.
-    // This keeps backward-compat with unauthenticated internal relays.
     if (username && password) {
       transportOptions.auth = { user: username, pass: password };
     }
@@ -41039,20 +41153,38 @@ async function sendEmail() {
     );
     const transport = nodemailer__WEBPACK_IMPORTED_MODULE_1__.createTransport(transportOptions);
 
-    // --- Build envelope ---
-    const envelope = { from, to, subject };
-    if (body) envelope.text = body;
-    if (html) envelope.html = html;
-    if (cc) envelope.cc = cc;
-    if (bcc) envelope.bcc = bcc;
-    if (replyTo) envelope.replyTo = replyTo;
+    // --- Build message ---
+    const message = { from, to, subject };
+
+    if (body) message.text = body;
+    if (html) message.html = html;
+    if (cc) message.cc = cc;
+    if (bcc) message.bcc = bcc;
+    if (replyTo) message.replyTo = replyTo;
+    if (priority) message.priority = priority.toLowerCase();
+    if (parsedAttachments) message.attachments = parsedAttachments;
+    if (icalEvent) message.icalEvent = icalEvent;
+    if (inReplyTo) message.inReplyTo = inReplyTo;
+    if (references) message.references = references;
+
+    // Custom headers (merge read-receipt header in if present)
+    if (parsedHeaders || readReceipt) {
+      message.headers = parsedHeaders || {};
+      if (readReceipt) {
+        message.headers['Disposition-Notification-To'] = readReceipt;
+      }
+    }
 
     // --- Send ---
     _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`Sending email to: ${to}`);
     if (cc) _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`  CC:  ${cc}`);
     if (bcc) _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`  BCC: ${bcc}`);
+    if (priority) _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`  Priority: ${priority}`);
+    if (parsedAttachments)
+      _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`  Attachments: ${parsedAttachments.length} file(s)`);
+    if (icalEvent) _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`  Calendar invite: attached`);
 
-    const info = await transport.sendMail(envelope);
+    const info = await transport.sendMail(message);
 
     _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`Email sent. Message-ID: ${info.messageId}`);
     _actions_core__WEBPACK_IMPORTED_MODULE_0__.setOutput('message_id', info.messageId);
