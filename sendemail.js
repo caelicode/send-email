@@ -192,7 +192,10 @@ async function sendEmail() {
       }
     }
 
-    // --- Send ---
+    // --- Send with retry ---
+    const maxRetries = 3;
+    const retryDelayMs = 2000;
+
     core.info(`Sending email to: ${to}`);
     if (cc) core.info(`  CC:  ${cc}`);
     if (bcc) core.info(`  BCC: ${bcc}`);
@@ -201,10 +204,29 @@ async function sendEmail() {
       core.info(`  Attachments: ${parsedAttachments.length} file(s)`);
     if (icalEvent) core.info(`  Calendar invite: attached`);
 
-    const info = await transport.sendMail(message);
-
-    core.info(`Email sent. Message-ID: ${info.messageId}`);
-    core.setOutput('message_id', info.messageId);
+    let lastError;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const info = await transport.sendMail(message);
+        core.info(`Email sent. Message-ID: ${info.messageId}`);
+        core.setOutput('message_id', info.messageId);
+        return;
+      } catch (sendError) {
+        lastError = sendError;
+        // Don't retry on authentication or validation errors
+        const code = sendError.responseCode || sendError.code;
+        if (code === 535 || code === 'EAUTH' || (code >= 500 && code <= 599 && code !== 552)) {
+          core.setFailed(`Failed to send email (non-retryable): ${sendError.message}`);
+          return;
+        }
+        if (attempt < maxRetries) {
+          const delay = retryDelayMs * attempt;
+          core.warning(`Attempt ${attempt}/${maxRetries} failed: ${sendError.message}. Retrying in ${delay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
+    core.setFailed(`Failed to send email after ${maxRetries} attempts: ${lastError.message}`);
   } catch (error) {
     core.setFailed(`Failed to send email: ${error.message}`);
   }
