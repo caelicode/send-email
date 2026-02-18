@@ -41175,7 +41175,10 @@ async function sendEmail() {
       }
     }
 
-    // --- Send ---
+    // --- Send with retry ---
+    const maxRetries = 3;
+    const retryDelayMs = 2000;
+
     _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`Sending email to: ${to}`);
     if (cc) _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`  CC:  ${cc}`);
     if (bcc) _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`  BCC: ${bcc}`);
@@ -41184,10 +41187,29 @@ async function sendEmail() {
       _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`  Attachments: ${parsedAttachments.length} file(s)`);
     if (icalEvent) _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`  Calendar invite: attached`);
 
-    const info = await transport.sendMail(message);
-
-    _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`Email sent. Message-ID: ${info.messageId}`);
-    _actions_core__WEBPACK_IMPORTED_MODULE_0__.setOutput('message_id', info.messageId);
+    let lastError;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const info = await transport.sendMail(message);
+        _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`Email sent. Message-ID: ${info.messageId}`);
+        _actions_core__WEBPACK_IMPORTED_MODULE_0__.setOutput('message_id', info.messageId);
+        return;
+      } catch (sendError) {
+        lastError = sendError;
+        // Don't retry on authentication or validation errors
+        const code = sendError.responseCode || sendError.code;
+        if (code === 535 || code === 'EAUTH' || (code >= 500 && code <= 599 && code !== 552)) {
+          _actions_core__WEBPACK_IMPORTED_MODULE_0__.setFailed(`Failed to send email (non-retryable): ${sendError.message}`);
+          return;
+        }
+        if (attempt < maxRetries) {
+          const delay = retryDelayMs * attempt;
+          _actions_core__WEBPACK_IMPORTED_MODULE_0__.warning(`Attempt ${attempt}/${maxRetries} failed: ${sendError.message}. Retrying in ${delay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
+    _actions_core__WEBPACK_IMPORTED_MODULE_0__.setFailed(`Failed to send email after ${maxRetries} attempts: ${lastError.message}`);
   } catch (error) {
     _actions_core__WEBPACK_IMPORTED_MODULE_0__.setFailed(`Failed to send email: ${error.message}`);
   }
