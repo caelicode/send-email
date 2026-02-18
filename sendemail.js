@@ -1,4 +1,4 @@
-import core from '@actions/core';
+import * as core from '@actions/core';
 import nodemailer from 'nodemailer';
 import { existsSync, readFileSync } from 'fs';
 import { resolve, basename } from 'path';
