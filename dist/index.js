@@ -367,6 +367,20 @@ function addressparser(str, options) {
         }
     });
 
+    // Merge fragments from unquoted display names containing commas/semicolons.
+    // When "Joe Foo, PhD <joe@example.com>" is split on the comma, it produces
+    // [{name:"Joe Foo", address:""}, {name:"PhD", address:"joe@example.com"}].
+    // Detect this pattern and recombine: a name-only entry followed by an entry
+    // that has both a name and an address (from angle-bracket notation).
+    for (let i = parsedAddresses.length - 2; i >= 0; i--) {
+        let current = parsedAddresses[i];
+        let next = parsedAddresses[i + 1];
+        if (current.address === '' && current.name && !current.group && next.address && next.name && !next.group) {
+            next.name = current.name + ', ' + next.name;
+            parsedAddresses.splice(i, 1);
+        }
+    }
+
     if (options.flatten) {
         let addresses = [];
         let walkAddressList = list => {
@@ -41810,7 +41824,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"126":{"description":"126 Mail (NetEa
 /***/ 6710:
 /***/ ((module) => {
 
-module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"8.0.1","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 test/**/*.test.js test/**/*-test.js","test:coverage":"c8 node --test --test-concurrency=1 test/**/*.test.js test/**/*-test.js","format":"prettier --write \\"**/*.{js,json,md}\\"","format:check":"prettier --check \\"**/*.{js,json,md}\\"","lint":"eslint .","lint:fix":"eslint . --fix","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-sesv2":"3.985.0","bunyan":"1.8.15","c8":"10.1.3","eslint":"10.0.0","eslint-config-prettier":"10.1.8","globals":"17.3.0","libbase64":"1.3.0","libmime":"5.3.7","libqp":"2.1.1","nodemailer-ntlm-auth":"1.0.4","prettier":"3.8.1","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.18.1"},"engines":{"node":">=6.0.0"}}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"8.0.2","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 test/**/*.test.js test/**/*-test.js","test:coverage":"c8 node --test --test-concurrency=1 test/**/*.test.js test/**/*-test.js","format":"prettier --write \\"**/*.{js,json,md}\\"","format:check":"prettier --check \\"**/*.{js,json,md}\\"","lint":"eslint .","lint:fix":"eslint . --fix","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-sesv2":"3.1004.0","bunyan":"1.8.15","c8":"11.0.0","eslint":"10.0.3","eslint-config-prettier":"10.1.8","globals":"17.4.0","libbase64":"1.3.0","libmime":"5.3.7","libqp":"2.1.1","nodemailer-ntlm-auth":"1.0.4","prettier":"3.8.1","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.18.1"},"engines":{"node":">=6.0.0"}}');
 
 /***/ })
 
