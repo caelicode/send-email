@@ -16,23 +16,20 @@ import { createRequire as __WEBPACK_EXTERNAL_createRequire } from "module";
 function _handleAddress(tokens, depth) {
     let isGroup = false;
     let state = 'text';
-    let address;
-    let addresses = [];
-    let data = {
+    const addresses = [];
+    const data = {
         address: [],
         comment: [],
         group: [],
         text: [],
-        textWasQuoted: [] // Track which text tokens came from inside quotes
+        textWasQuoted: []
     };
-    let i;
-    let len;
-    let insideQuotes = false; // Track if we're currently inside a quoted string
+    let insideQuotes = false;
 
     // Filter out <addresses>, (comments) and regular text
-    for (i = 0, len = tokens.length; i < len; i++) {
-        let token = tokens[i];
-        let prevToken = i ? tokens[i - 1] : null;
+    for (let i = 0, len = tokens.length; i < len; i++) {
+        const token = tokens[i];
+        const prevToken = i ? tokens[i - 1] : null;
         if (token.type === 'operator') {
             switch (token.value) {
                 case '<':
@@ -49,7 +46,6 @@ function _handleAddress(tokens, depth) {
                     insideQuotes = false;
                     break;
                 case '"':
-                    // Track quote state for text tokens
                     insideQuotes = !insideQuotes;
                     state = 'text';
                     break;
@@ -60,14 +56,12 @@ function _handleAddress(tokens, depth) {
             }
         } else if (token.value) {
             if (state === 'address') {
-                // handle use case where unquoted name includes a "<"
-                // Apple Mail truncates everything between an unexpected < and an address
-                // and so will we
+                // Handle unquoted name that includes a "<".
+                // Apple Mail truncates everything between an unexpected < and an address.
                 token.value = token.value.replace(/^[^<]*<\s*/, '');
             }
 
             if (prevToken && prevToken.noBreak && data[state].length) {
-                // join values
                 data[state][data[state].length - 1] += token.value;
                 if (state === 'text' && insideQuotes) {
                     data.textWasQuoted[data.textWasQuoted.length - 1] = true;
@@ -94,11 +88,9 @@ function _handleAddress(tokens, depth) {
         // Parse group members, but flatten any nested groups (RFC 5322 doesn't allow nesting)
         let groupMembers = [];
         if (data.group.length) {
-            let parsedGroup = addressparser(data.group.join(','), { _depth: depth + 1 });
-            // Flatten: if any member is itself a group, extract its members into the sequence
+            const parsedGroup = addressparser(data.group.join(','), { _depth: depth + 1 });
             parsedGroup.forEach(member => {
                 if (member.group) {
-                    // Nested group detected - flatten it by adding its members directly
                     groupMembers = groupMembers.concat(member.group);
                 } else {
                     groupMembers.push(member);
@@ -107,40 +99,40 @@ function _handleAddress(tokens, depth) {
         }
 
         addresses.push({
-            name: data.text || (address && address.name),
+            name: data.text || '',
             group: groupMembers
         });
     } else {
         // If no address was found, try to detect one from regular text
         if (!data.address.length && data.text.length) {
-            for (i = data.text.length - 1; i >= 0; i--) {
-                // Security fix: Do not extract email addresses from quoted strings
-                // RFC 5321 allows @ inside quoted local-parts like "user@domain"@example.com
-                // Extracting emails from quoted text leads to misrouting vulnerabilities
-                if (!data.textWasQuoted[i] && data.text[i].match(/^[^@\s]+@[^@\s]+$/)) {
+            for (let i = data.text.length - 1; i >= 0; i--) {
+                // Security: Do not extract email addresses from quoted strings.
+                // RFC 5321 allows @ inside quoted local-parts like "user@domain"@example.com.
+                // Extracting emails from quoted text leads to misrouting vulnerabilities.
+                if (!data.textWasQuoted[i] && /^[^@\s]+@[^@\s]+$/.test(data.text[i])) {
                     data.address = data.text.splice(i, 1);
                     data.textWasQuoted.splice(i, 1);
                     break;
                 }
             }
 
-            let _regexHandler = function (address) {
-                if (!data.address.length) {
-                    data.address = [address.trim()];
-                    return ' ';
-                } else {
-                    return address;
-                }
-            };
-
-            // still no address
+            // Try a looser regex match if strict match found nothing
             if (!data.address.length) {
-                for (i = data.text.length - 1; i >= 0; i--) {
-                    // Security fix: Do not extract email addresses from quoted strings
+                let extracted = false;
+                for (let i = data.text.length - 1; i >= 0; i--) {
+                    // Security: Do not extract email addresses from quoted strings
                     if (!data.textWasQuoted[i]) {
-                        // fixed the regex to parse email address correctly when email address has more than one @
-                        data.text[i] = data.text[i].replace(/\s*\b[^@\s]+@[^\s]+\b\s*/, _regexHandler).trim();
-                        if (data.address.length) {
+                        data.text[i] = data.text[i]
+                            .replace(/\s*\b[^@\s]+@[^\s]+\b\s*/, match => {
+                                if (!extracted) {
+                                    data.address = [match.trim()];
+                                    extracted = true;
+                                    return ' ';
+                                }
+                                return match;
+                            })
+                            .trim();
+                        if (extracted) {
                             break;
                         }
                     }
@@ -148,13 +140,13 @@ function _handleAddress(tokens, depth) {
             }
         }
 
-        // If there's still is no text but a comment exixts, replace the two
+        // If there's still no text but a comment exists, replace the two
         if (!data.text.length && data.comment.length) {
             data.text = data.comment;
             data.comment = [];
         }
 
-        // Keep only the first address occurence, push others to regular text
+        // Keep only the first address occurrence, push others to regular text
         if (data.address.length > 1) {
             data.text = data.text.concat(data.address.splice(1));
         }
@@ -163,24 +155,20 @@ function _handleAddress(tokens, depth) {
         data.text = data.text.join(' ');
         data.address = data.address.join(' ');
 
-        if (!data.address && isGroup) {
-            return [];
-        } else {
-            address = {
-                address: data.address || data.text || '',
-                name: data.text || data.address || ''
-            };
+        const address = {
+            address: data.address || data.text || '',
+            name: data.text || data.address || ''
+        };
 
-            if (address.address === address.name) {
-                if ((address.address || '').match(/@/)) {
-                    address.name = '';
-                } else {
-                    address.address = '';
-                }
+        if (address.address === address.name) {
+            if (/@/.test(address.address || '')) {
+                address.name = '';
+            } else {
+                address.address = '';
             }
-
-            addresses.push(address);
         }
+
+        addresses.push(address);
     }
 
     return addresses;
@@ -226,11 +214,11 @@ class Tokenizer {
      * @return {Array} An array of operator|text tokens
      */
     tokenize() {
-        let list = [];
+        const list = [];
 
         for (let i = 0, len = this.str.length; i < len; i++) {
-            let chr = this.str.charAt(i);
-            let nextChr = i < len - 1 ? this.str.charAt(i + 1) : null;
+            const chr = this.str.charAt(i);
+            const nextChr = i < len - 1 ? this.str.charAt(i + 1) : null;
             this.checkChar(chr, nextChr);
         }
 
@@ -331,17 +319,17 @@ const MAX_NESTED_GROUP_DEPTH = 50;
  */
 function addressparser(str, options) {
     options = options || {};
-    let depth = options._depth || 0;
+    const depth = options._depth || 0;
 
     // Prevent stack overflow from deeply nested groups (DoS protection)
     if (depth > MAX_NESTED_GROUP_DEPTH) {
         return [];
     }
 
-    let tokenizer = new Tokenizer(str);
-    let tokens = tokenizer.tokenize();
+    const tokenizer = new Tokenizer(str);
+    const tokens = tokenizer.tokenize();
 
-    let addresses = [];
+    const addresses = [];
     let address = [];
     let parsedAddresses = [];
 
@@ -360,32 +348,43 @@ function addressparser(str, options) {
         addresses.push(address);
     }
 
-    addresses.forEach(address => {
-        address = _handleAddress(address, depth);
-        if (address.length) {
-            parsedAddresses = parsedAddresses.concat(address);
+    addresses.forEach(addr => {
+        const handled = _handleAddress(addr, depth);
+        if (handled.length) {
+            parsedAddresses = parsedAddresses.concat(handled);
         }
     });
 
+    // Merge fragments produced when unquoted display names contain commas.
+    // "Joe Foo, PhD <joe@example.com>" is split on the comma into
+    // [{name:"Joe Foo", address:""}, {name:"PhD", address:"joe@example.com"}].
+    // Recombine: a name-only entry followed by an entry with both name and address.
+    for (let i = parsedAddresses.length - 2; i >= 0; i--) {
+        const current = parsedAddresses[i];
+        const next = parsedAddresses[i + 1];
+        if (current.address === '' && current.name && !current.group && next.address && next.name) {
+            next.name = current.name + ', ' + next.name;
+            parsedAddresses.splice(i, 1);
+        }
+    }
+
     if (options.flatten) {
-        let addresses = [];
-        let walkAddressList = list => {
-            list.forEach(address => {
-                if (address.group) {
-                    return walkAddressList(address.group);
-                } else {
-                    addresses.push(address);
+        const flatAddresses = [];
+        const walkAddressList = list => {
+            list.forEach(entry => {
+                if (entry.group) {
+                    return walkAddressList(entry.group);
                 }
+                flatAddresses.push(entry);
             });
         };
         walkAddressList(parsedAddresses);
-        return addresses;
+        return flatAddresses;
     }
 
     return parsedAddresses;
 }
 
-// expose to the world
 module.exports = addressparser;
 
 
@@ -396,7 +395,7 @@ module.exports = addressparser;
 
 
 
-const Transform = (__nccwpck_require__(2203).Transform);
+const { Transform } = __nccwpck_require__(2203);
 
 /**
  * Encodes a Buffer into a base64 encoded string
@@ -427,16 +426,17 @@ function wrap(str, lineLength) {
         return str;
     }
 
-    let result = [];
+    const result = [];
     let pos = 0;
-    let chunkLength = lineLength * 1024;
+    const chunkLength = lineLength * 1024;
+    const wrapRegex = new RegExp('.{' + lineLength + '}', 'g');
     while (pos < str.length) {
-        let wrappedLines = str.substr(pos, chunkLength).replace(new RegExp('.{' + lineLength + '}', 'g'), '$&\r\n');
+        const wrappedLines = str.substr(pos, chunkLength).replace(wrapRegex, '$&\r\n').trim();
         result.push(wrappedLines);
         pos += chunkLength;
     }
 
-    return result.join('');
+    return result.join('\r\n').trim();
 }
 
 /**
@@ -490,20 +490,17 @@ class Encoder extends Transform {
         if (this.options.lineLength) {
             b64 = wrap(b64, this.options.lineLength);
 
-            let lastLF = b64.lastIndexOf('\n');
+            // remove last line as it is still most probably incomplete
+            const lastLF = b64.lastIndexOf('\n');
             if (lastLF < 0) {
                 this._curLine = b64;
                 b64 = '';
+            } else if (lastLF === b64.length - 1) {
+                this._curLine = '';
             } else {
                 this._curLine = b64.substring(lastLF + 1);
                 b64 = b64.substring(0, lastLF + 1);
-
-                if (b64 && !b64.endsWith('\r\n')) {
-                    b64 += '\r\n';
-                }
             }
-        } else {
-            this._curLine = '';
         }
 
         if (b64) {
@@ -520,6 +517,7 @@ class Encoder extends Transform {
         }
 
         if (this._curLine) {
+            this._curLine = wrap(this._curLine, this.options.lineLength);
             this.outputBytes += this._curLine.length;
             this.push(Buffer.from(this._curLine, 'ascii'));
             this._curLine = '';
@@ -548,7 +546,7 @@ module.exports = {
 const MessageParser = __nccwpck_require__(4657);
 const RelaxedBody = __nccwpck_require__(234);
 const sign = __nccwpck_require__(9869);
-const PassThrough = (__nccwpck_require__(2203).PassThrough);
+const { PassThrough } = __nccwpck_require__(2203);
 const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
 const crypto = __nccwpck_require__(6982);
@@ -638,7 +636,7 @@ class DKIMSigner {
             }
             return this.createReadCache();
         }
-        let chunk = this.chunks[this.readPos++];
+        const chunk = this.chunks[this.readPos++];
         if (this.output.write(chunk) === false) {
             return this.output.once('drain', () => {
                 this.sendNextChunk();
@@ -649,13 +647,13 @@ class DKIMSigner {
 
     sendSignedOutput() {
         let keyPos = 0;
-        let signNextKey = () => {
+        const signNextKey = () => {
             if (keyPos >= this.keys.length) {
                 this.output.write(this.parser.rawHeaders);
                 return setImmediate(() => this.sendNextChunk());
             }
-            let key = this.keys[keyPos++];
-            let dkimField = sign(this.headers, this.hashAlgo, this.bodyHash, {
+            const key = this.keys[keyPos++];
+            const dkimField = sign(this.headers, this.hashAlgo, this.bodyHash, {
                 domainName: key.domainName,
                 keySelector: key.keySelector,
                 privateKey: key.privateKey,
@@ -753,7 +751,7 @@ class DKIM {
     }
 
     sign(input, extraOptions) {
-        let output = new PassThrough();
+        const output = new PassThrough();
         let inputStream = input;
         let writeValue = false;
 
@@ -767,18 +765,10 @@ class DKIM {
 
         let options = this.options;
         if (extraOptions && Object.keys(extraOptions).length) {
-            options = {};
-            Object.keys(this.options || {}).forEach(key => {
-                options[key] = this.options[key];
-            });
-            Object.keys(extraOptions || {}).forEach(key => {
-                if (!(key in options)) {
-                    options[key] = extraOptions[key];
-                }
-            });
+            options = Object.assign({}, extraOptions, this.options);
         }
 
-        let signer = new DKIMSigner(options, this.keys, inputStream, output);
+        const signer = new DKIMSigner(options, this.keys, inputStream, output);
         setImmediate(() => {
             signer.signStream();
             if (writeValue) {
@@ -802,7 +792,7 @@ module.exports = DKIM;
 
 
 
-const Transform = (__nccwpck_require__(2203).Transform);
+const { Transform } = __nccwpck_require__(2203);
 
 /**
  * MessageParser instance is a transform stream that separates message headers
@@ -826,8 +816,8 @@ class MessageParser extends Transform {
      * @param {Buffer} data Next data chunk from the stream
      */
     updateLastBytes(data) {
-        let lblen = this.lastBytes.length;
-        let nblen = Math.min(data.length, lblen);
+        const lblen = this.lastBytes.length;
+        const nblen = Math.min(data.length, lblen);
 
         // shift existing bytes
         for (let i = 0, len = lblen - nblen; i < len; i++) {
@@ -852,9 +842,8 @@ class MessageParser extends Transform {
             return true;
         }
 
-        let lblen = this.lastBytes.length;
+        const lblen = this.lastBytes.length;
         let headerPos = 0;
-        this.curLinePos = 0;
         for (let i = 0, len = this.lastBytes.length + data.length; i < len; i++) {
             let chr;
             if (i < lblen) {
@@ -863,8 +852,8 @@ class MessageParser extends Transform {
                 chr = data[i - lblen];
             }
             if (chr === 0x0a && i) {
-                let pr1 = i - 1 < lblen ? this.lastBytes[i - 1] : data[i - 1 - lblen];
-                let pr2 = i > 1 ? (i - 2 < lblen ? this.lastBytes[i - 2] : data[i - 2 - lblen]) : false;
+                const pr1 = i - 1 < lblen ? this.lastBytes[i - 1] : data[i - 1 - lblen];
+                const pr2 = i > 1 ? (i - 2 < lblen ? this.lastBytes[i - 2] : data[i - 2 - lblen]) : false;
                 if (pr1 === 0x0a) {
                     this.headersParsed = true;
                     headerPos = i - lblen + 1;
@@ -885,16 +874,16 @@ class MessageParser extends Transform {
             this.headerChunks = null;
             this.emit('headers', this.parseHeaders());
             if (data.length - 1 > headerPos) {
-                let chunk = data.slice(headerPos);
+                const chunk = data.slice(headerPos);
                 this.bodySize += chunk.length;
                 // this would be the first chunk of data sent downstream
                 setImmediate(() => this.push(chunk));
             }
             return false;
-        } else {
-            this.headerBytes += data.length;
-            this.headerChunks.push(data);
         }
+
+        this.headerBytes += data.length;
+        this.headerChunks.push(data);
 
         // store last 4 bytes to catch header break
         this.updateLastBytes(data);
@@ -929,7 +918,7 @@ class MessageParser extends Transform {
 
     _flush(callback) {
         if (this.headerChunks) {
-            let chunk = Buffer.concat(this.headerChunks, this.headerBytes);
+            const chunk = Buffer.concat(this.headerChunks, this.headerBytes);
             this.bodySize += chunk.length;
             this.push(chunk);
             this.headerChunks = null;
@@ -938,7 +927,7 @@ class MessageParser extends Transform {
     }
 
     parseHeaders() {
-        let lines = (this.rawHeaders || '').toString().split(/\r?\n/);
+        const lines = (this.rawHeaders || '').toString().split(/\r?\n/);
         for (let i = lines.length - 1; i > 0; i--) {
             if (/^\s/.test(lines[i])) {
                 lines[i - 1] += '\n' + lines[i];
@@ -966,7 +955,7 @@ module.exports = MessageParser;
 
 // streams through a message body and calculates relaxed body hash
 
-const Transform = (__nccwpck_require__(2203).Transform);
+const { Transform } = __nccwpck_require__(2203);
 const crypto = __nccwpck_require__(6982);
 
 class RelaxedBody extends Transform {
@@ -993,7 +982,7 @@ class RelaxedBody extends Transform {
         // If we get another chunk that does not match this description then we can restore the previously processed data
         let state = 'file';
         for (let i = chunk.length - 1; i >= 0; i--) {
-            let c = chunk[i];
+            const c = chunk[i];
 
             if (state === 'file' && (c === 0x0a || c === 0x0d)) {
                 // do nothing, found \n or \r at the end of chunk, stil end of file
@@ -1145,7 +1134,7 @@ module.exports = (headers, hashAlgo, bodyHash, options) => {
     options = options || {};
 
     // all listed fields from RFC4871 #5.5
-    let defaultFieldNames =
+    const defaultFieldNames =
         'From:Sender:Reply-To:Subject:Date:Message-ID:To:' +
         'Cc:MIME-Version:Content-Type:Content-Transfer-Encoding:Content-ID:' +
         'Content-Description:Resent-Date:Resent-From:Resent-Sender:' +
@@ -1153,17 +1142,16 @@ module.exports = (headers, hashAlgo, bodyHash, options) => {
         'List-Id:List-Help:List-Unsubscribe:List-Subscribe:List-Post:' +
         'List-Owner:List-Archive';
 
-    let fieldNames = options.headerFieldNames || defaultFieldNames;
+    const fieldNames = options.headerFieldNames || defaultFieldNames;
 
-    let canonicalizedHeaderData = relaxedHeaders(headers, fieldNames, options.skipFields);
-    let dkimHeader = generateDKIMHeader(options.domainName, options.keySelector, canonicalizedHeaderData.fieldNames, hashAlgo, bodyHash);
-
-    let signer, signature;
+    const canonicalizedHeaderData = relaxedHeaders(headers, fieldNames, options.skipFields);
+    const dkimHeader = generateDKIMHeader(options.domainName, options.keySelector, canonicalizedHeaderData.fieldNames, hashAlgo, bodyHash);
 
     canonicalizedHeaderData.headers += 'dkim-signature:' + relaxedHeaderLine(dkimHeader);
 
-    signer = crypto.createSign(('rsa-' + hashAlgo).toUpperCase());
+    const signer = crypto.createSign(('rsa-' + hashAlgo).toUpperCase());
     signer.update(canonicalizedHeaderData.headers);
+    let signature;
     try {
         signature = signer.sign(options.privateKey, 'base64');
     } catch (_E) {
@@ -1176,7 +1164,7 @@ module.exports = (headers, hashAlgo, bodyHash, options) => {
 module.exports.relaxedHeaders = relaxedHeaders;
 
 function generateDKIMHeader(domainName, keySelector, fieldNames, hashAlgo, bodyHash) {
-    let dkim = [
+    const dkim = [
         'v=1',
         'a=rsa-' + hashAlgo,
         'c=relaxed/relaxed',
@@ -1191,9 +1179,9 @@ function generateDKIMHeader(domainName, keySelector, fieldNames, hashAlgo, bodyH
 }
 
 function relaxedHeaders(headers, fieldNames, skipFields) {
-    let includedFields = new Set();
-    let skip = new Set();
-    let headerFields = new Map();
+    const includedFields = new Set();
+    const skip = new Set();
+    const headerFields = new Map();
 
     (skipFields || '')
         .toLowerCase()
@@ -1211,15 +1199,15 @@ function relaxedHeaders(headers, fieldNames, skipFields) {
         });
 
     for (let i = headers.length - 1; i >= 0; i--) {
-        let line = headers[i];
+        const line = headers[i];
         // only include the first value from bottom to top
         if (includedFields.has(line.key) && !headerFields.has(line.key)) {
             headerFields.set(line.key, relaxedHeaderLine(line.line));
         }
     }
 
-    let headersList = [];
-    let fields = [];
+    const headersList = [];
+    const fields = [];
     includedFields.forEach(field => {
         if (headerFields.has(field)) {
             fields.push(field);
@@ -1301,13 +1289,10 @@ const ERROR_CODES = {
 };
 
 // Export error codes as string constants and the full definitions object
-module.exports = Object.keys(ERROR_CODES).reduce(
-    (exports, code) => {
-        exports[code] = code;
-        return exports;
-    },
-    { ERROR_CODES }
-);
+module.exports = { ERROR_CODES };
+for (const code of Object.keys(ERROR_CODES)) {
+    module.exports[code] = code;
+}
 
 
 /***/ }),
@@ -1342,8 +1327,8 @@ class Cookies {
      * @param {String} url Current URL
      */
     set(cookieStr, url) {
-        let urlparts = urllib.parse(url || '');
-        let cookie = this.parse(cookieStr);
+        const urlparts = urllib.parse(url || '');
+        const cookie = this.parse(cookieStr);
         let domain;
 
         if (cookie.domain) {
@@ -1393,15 +1378,13 @@ class Cookies {
      * @returns {Array} An array of cookie objects
      */
     list(url) {
-        let result = [];
-        let i;
-        let cookie;
+        const result = [];
 
-        for (i = this.cookies.length - 1; i >= 0; i--) {
-            cookie = this.cookies[i];
+        for (let i = this.cookies.length - 1; i >= 0; i--) {
+            const cookie = this.cookies[i];
 
             if (this.isExpired(cookie)) {
-                this.cookies.splice(i, i);
+                this.cookies.splice(i, 1);
                 continue;
             }
 
@@ -1420,14 +1403,14 @@ class Cookies {
      * @returns {Object} Cookie object
      */
     parse(cookieStr) {
-        let cookie = {};
+        const cookie = {};
 
         (cookieStr || '')
             .toString()
             .split(';')
             .forEach(cookiePart => {
-                let valueParts = cookiePart.split('=');
-                let key = valueParts.shift().trim().toLowerCase();
+                const valueParts = cookiePart.split('=');
+                const key = valueParts.shift().trim().toLowerCase();
                 let value = valueParts.join('=').trim();
                 let domain;
 
@@ -1488,7 +1471,7 @@ class Cookies {
      * @returns {Boolean} true if cookie is valid for specifiec URL
      */
     match(cookie, url) {
-        let urlparts = urllib.parse(url || '');
+        const urlparts = urllib.parse(url || '');
 
         // check if hostname matches
         // .foo.com also matches subdomains, foo.com does not
@@ -1500,7 +1483,7 @@ class Cookies {
         }
 
         // check if path matches
-        let path = this.getPath(urlparts.pathname);
+        const path = this.getPath(urlparts.pathname);
         if (path.substr(0, cookie.path.length) !== cookie.path) {
             return false;
         }
@@ -1519,16 +1502,13 @@ class Cookies {
      * @param {Object} cookie Cookie value to be stored
      */
     add(cookie) {
-        let i;
-        let len;
-
         // nothing to do here
         if (!cookie || !cookie.name) {
             return false;
         }
 
         // overwrite if has same params
-        for (i = 0, len = this.cookies.length; i < len; i++) {
+        for (let i = 0, len = this.cookies.length; i < len; i++) {
             if (this.compare(this.cookies[i], cookie)) {
                 // check if the cookie needs to be removed instead
                 if (this.isExpired(cookie)) {
@@ -1557,7 +1537,7 @@ class Cookies {
      * @returns {Boolean} True, if the cookies are the same
      */
     compare(a, b) {
-        return a.name === b.name && a.path === b.path && a.domain === b.domain && a.secure === b.secure && a.httponly === a.httponly;
+        return a.name === b.name && a.path === b.path && a.domain === b.domain && a.secure === b.secure && a.httponly === b.httponly;
     }
 
     /**
@@ -1609,7 +1589,7 @@ const http = __nccwpck_require__(8611);
 const https = __nccwpck_require__(5692);
 const urllib = __nccwpck_require__(7016);
 const zlib = __nccwpck_require__(3106);
-const PassThrough = (__nccwpck_require__(2203).PassThrough);
+const { PassThrough } = __nccwpck_require__(2203);
 const Cookies = __nccwpck_require__(4312);
 const packageData = __nccwpck_require__(6710);
 const net = __nccwpck_require__(9278);
@@ -1638,16 +1618,16 @@ function nmfetch(url, options) {
         options.cookie = false;
     }
 
-    let fetchRes = options.fetchRes;
-    let parsed = urllib.parse(url);
+    const fetchRes = options.fetchRes;
+    const parsed = urllib.parse(url);
     let method = (options.method || '').toString().trim().toUpperCase() || 'GET';
     let finished = false;
     let cookies;
     let body;
 
-    let handler = parsed.protocol === 'https:' ? https : http;
+    const handler = parsed.protocol === 'https:' ? https : http;
 
-    let headers = {
+    const headers = {
         'accept-encoding': 'gzip,deflate',
         'user-agent': 'nodemailer/' + packageData.version
     };
@@ -1695,7 +1675,7 @@ function nmfetch(url, options) {
                     body = Buffer.from(
                         Object.keys(options.body)
                             .map(key => {
-                                let value = options.body[key].toString().trim();
+                                const value = options.body[key].toString().trim();
                                 return encodeURIComponent(key) + '=' + encodeURIComponent(value);
                             })
                             .join('&')
@@ -1722,7 +1702,7 @@ function nmfetch(url, options) {
     }
 
     let req;
-    let reqOptions = {
+    const reqOptions = {
         method,
         host: parsed.hostname,
         path: parsed.path,
@@ -1733,9 +1713,7 @@ function nmfetch(url, options) {
     };
 
     if (options.tls) {
-        Object.keys(options.tls).forEach(key => {
-            reqOptions[key] = options.tls[key];
-        });
+        Object.assign(reqOptions, options.tls);
     }
 
     if (
@@ -1767,7 +1745,7 @@ function nmfetch(url, options) {
             }
             finished = true;
             req.abort();
-            let err = new Error('Request Timeout');
+            const err = new Error('Request Timeout');
             err.code = errors.EFETCH;
             err.sourceUrl = url;
             fetchRes.emit('error', err);
@@ -1809,7 +1787,7 @@ function nmfetch(url, options) {
             options.redirects++;
             if (options.redirects > options.maxRedirects) {
                 finished = true;
-                let err = new Error('Maximum redirect count exceeded');
+                const err = new Error('Maximum redirect count exceeded');
                 err.code = errors.EFETCH;
                 err.sourceUrl = url;
                 fetchRes.emit('error', err);
@@ -1827,7 +1805,7 @@ function nmfetch(url, options) {
 
         if (res.statusCode >= 300 && !options.allowErrorResponse) {
             finished = true;
-            let err = new Error('Invalid status code ' + res.statusCode);
+            const err = new Error('Invalid status code ' + res.statusCode);
             err.code = errors.EFETCH;
             err.sourceUrl = url;
             fetchRes.emit('error', err);
@@ -1868,9 +1846,8 @@ function nmfetch(url, options) {
             try {
                 if (typeof body.pipe === 'function') {
                     return body.pipe(req);
-                } else {
-                    req.write(body);
                 }
+                req.write(body);
             } catch (err) {
                 finished = true;
                 err.code = errors.EFETCH;
@@ -1906,7 +1883,7 @@ class JSONTransport {
     constructor(options) {
         options = options || {};
 
-        this.options = options || {};
+        this.options = options;
 
         this.name = 'JSONTransport';
         this.version = packageData.version;
@@ -1926,10 +1903,10 @@ class JSONTransport {
         // Sendmail strips this header line by itself
         mail.message.keepBcc = true;
 
-        let envelope = mail.data.envelope || mail.message.getEnvelope();
-        let messageId = mail.message.messageId();
+        const envelope = mail.data.envelope || mail.message.getEnvelope();
+        const messageId = mail.message.messageId();
 
-        let recipients = [].concat(envelope.to || []);
+        const recipients = [].concat(envelope.to || []);
         if (recipients.length > 3) {
             recipients.push('...and ' + recipients.splice(2).length + ' more');
         }
@@ -1986,7 +1963,7 @@ module.exports = JSONTransport;
 
 const MimeNode = __nccwpck_require__(6628);
 const mimeFuncs = __nccwpck_require__(539);
-const parseDataURI = (__nccwpck_require__(1284).parseDataURI);
+const { parseDataURI } = __nccwpck_require__(1284);
 
 /**
  * Creates the object for composing a MimeNode instance out from the mail options
@@ -2041,7 +2018,7 @@ class MailComposer {
 
         // Add headers to the root node, always overrides custom headers
         ['from', 'sender', 'to', 'cc', 'bcc', 'reply-to', 'in-reply-to', 'references', 'subject', 'message-id', 'date'].forEach(header => {
-            let key = header.replace(/-(\w)/g, (o, c) => c.toUpperCase());
+            const key = header.replace(/-(\w)/g, (o, c) => c.toUpperCase());
             if (this.mail[key]) {
                 this.message.setHeader(header, this.mail[key]);
             }
@@ -2066,20 +2043,18 @@ class MailComposer {
      */
     getAttachments(findRelated) {
         let icalEvent, eventObject;
-        let attachments = [].concat(this.mail.attachments || []).map((attachment, i) => {
-            let data;
-
+        const attachments = [].concat(this.mail.attachments || []).map((attachment, i) => {
             if (/^data:/i.test(attachment.path || attachment.href)) {
                 attachment = this._processDataUrl(attachment);
             }
 
-            let contentType =
+            const contentType =
                 attachment.contentType || mimeFuncs.detectMimeType(attachment.filename || attachment.path || attachment.href || 'bin');
 
-            let isImage = /^image\//i.test(contentType);
-            let isMessageNode = /^message\//i.test(contentType);
+            const isImage = /^image\//i.test(contentType);
+            const isMessageNode = /^message\//i.test(contentType);
 
-            let contentDisposition =
+            const contentDisposition =
                 attachment.contentDisposition || (isMessageNode || (isImage && attachment.cid) ? 'inline' : 'attachment');
 
             let contentTransferEncoding;
@@ -2093,7 +2068,7 @@ class MailComposer {
                 contentTransferEncoding = 'base64'; // the default
             }
 
-            data = {
+            const data = {
                 contentType,
                 contentDisposition,
                 contentTransferEncoding
@@ -2155,10 +2130,7 @@ class MailComposer {
                 };
             }
 
-            eventObject = {};
-            Object.keys(icalEvent).forEach(key => {
-                eventObject[key] = icalEvent[key];
-            });
+            eventObject = Object.assign({}, icalEvent);
 
             eventObject.contentType = 'application/ics';
             if (!eventObject.headers) {
@@ -2174,12 +2146,12 @@ class MailComposer {
                 attached: attachments.concat(eventObject || []),
                 related: []
             };
-        } else {
-            return {
-                attached: attachments.filter(attachment => !attachment.cid).concat(eventObject || []),
-                related: attachments.filter(attachment => !!attachment.cid)
-            };
         }
+
+        return {
+            attached: attachments.filter(attachment => !attachment.cid).concat(eventObject || []),
+            related: attachments.filter(attachment => !!attachment.cid)
+        };
     }
 
     /**
@@ -2188,13 +2160,8 @@ class MailComposer {
      * @returns {Array} An array of alternative elements. Includes the `text` and `html` values as well
      */
     getAlternatives() {
-        let alternatives = [],
-            text,
-            html,
-            watchHtml,
-            amp,
-            icalEvent,
-            eventObject;
+        const alternatives = [];
+        let text, html, watchHtml, amp, icalEvent, eventObject;
 
         if (this.mail.text) {
             if (
@@ -2251,10 +2218,7 @@ class MailComposer {
                 };
             }
 
-            eventObject = {};
-            Object.keys(icalEvent).forEach(key => {
-                eventObject[key] = icalEvent[key];
-            });
+            eventObject = Object.assign({}, icalEvent);
 
             if (eventObject.content && typeof eventObject.content === 'object') {
                 // we are going to have the same attachment twice, so mark this to be
@@ -2292,13 +2256,11 @@ class MailComposer {
             .concat(eventObject || [])
             .concat(this.mail.alternatives || [])
             .forEach(alternative => {
-                let data;
-
                 if (/^data:/i.test(alternative.path || alternative.href)) {
                     alternative = this._processDataUrl(alternative);
                 }
 
-                data = {
+                const data = {
                     contentType:
                         alternative.contentType ||
                         mimeFuncs.detectMimeType(alternative.filename || alternative.path || alternative.href || 'txt'),
@@ -2350,26 +2312,22 @@ class MailComposer {
      * @returns {Object} MimeNode node element
      */
     _createMixed(parentNode) {
-        let node;
-
-        if (!parentNode) {
-            node = new MimeNode('multipart/mixed', {
-                baseBoundary: this.mail.baseBoundary,
-                textEncoding: this.mail.textEncoding,
-                boundaryPrefix: this.mail.boundaryPrefix,
-                disableUrlAccess: this.mail.disableUrlAccess,
-                disableFileAccess: this.mail.disableFileAccess,
-                normalizeHeaderKey: this.mail.normalizeHeaderKey,
-                newline: this.mail.newline
-            });
-        } else {
-            node = parentNode.createChild('multipart/mixed', {
-                disableUrlAccess: this.mail.disableUrlAccess,
-                disableFileAccess: this.mail.disableFileAccess,
-                normalizeHeaderKey: this.mail.normalizeHeaderKey,
-                newline: this.mail.newline
-            });
-        }
+        const node = parentNode
+            ? parentNode.createChild('multipart/mixed', {
+                  disableUrlAccess: this.mail.disableUrlAccess,
+                  disableFileAccess: this.mail.disableFileAccess,
+                  normalizeHeaderKey: this.mail.normalizeHeaderKey,
+                  newline: this.mail.newline
+              })
+            : new MimeNode('multipart/mixed', {
+                  baseBoundary: this.mail.baseBoundary,
+                  textEncoding: this.mail.textEncoding,
+                  boundaryPrefix: this.mail.boundaryPrefix,
+                  disableUrlAccess: this.mail.disableUrlAccess,
+                  disableFileAccess: this.mail.disableFileAccess,
+                  normalizeHeaderKey: this.mail.normalizeHeaderKey,
+                  newline: this.mail.newline
+              });
 
         if (this._useAlternative) {
             this._createAlternative(node);
@@ -2398,26 +2356,22 @@ class MailComposer {
      * @returns {Object} MimeNode node element
      */
     _createAlternative(parentNode) {
-        let node;
-
-        if (!parentNode) {
-            node = new MimeNode('multipart/alternative', {
-                baseBoundary: this.mail.baseBoundary,
-                textEncoding: this.mail.textEncoding,
-                boundaryPrefix: this.mail.boundaryPrefix,
-                disableUrlAccess: this.mail.disableUrlAccess,
-                disableFileAccess: this.mail.disableFileAccess,
-                normalizeHeaderKey: this.mail.normalizeHeaderKey,
-                newline: this.mail.newline
-            });
-        } else {
-            node = parentNode.createChild('multipart/alternative', {
-                disableUrlAccess: this.mail.disableUrlAccess,
-                disableFileAccess: this.mail.disableFileAccess,
-                normalizeHeaderKey: this.mail.normalizeHeaderKey,
-                newline: this.mail.newline
-            });
-        }
+        const node = parentNode
+            ? parentNode.createChild('multipart/alternative', {
+                  disableUrlAccess: this.mail.disableUrlAccess,
+                  disableFileAccess: this.mail.disableFileAccess,
+                  normalizeHeaderKey: this.mail.normalizeHeaderKey,
+                  newline: this.mail.newline
+              })
+            : new MimeNode('multipart/alternative', {
+                  baseBoundary: this.mail.baseBoundary,
+                  textEncoding: this.mail.textEncoding,
+                  boundaryPrefix: this.mail.boundaryPrefix,
+                  disableUrlAccess: this.mail.disableUrlAccess,
+                  disableFileAccess: this.mail.disableFileAccess,
+                  normalizeHeaderKey: this.mail.normalizeHeaderKey,
+                  newline: this.mail.newline
+              });
 
         this._alternatives.forEach(alternative => {
             if (this._useRelated && this._htmlNode === alternative) {
@@ -2437,26 +2391,22 @@ class MailComposer {
      * @returns {Object} MimeNode node element
      */
     _createRelated(parentNode) {
-        let node;
-
-        if (!parentNode) {
-            node = new MimeNode('multipart/related; type="text/html"', {
-                baseBoundary: this.mail.baseBoundary,
-                textEncoding: this.mail.textEncoding,
-                boundaryPrefix: this.mail.boundaryPrefix,
-                disableUrlAccess: this.mail.disableUrlAccess,
-                disableFileAccess: this.mail.disableFileAccess,
-                normalizeHeaderKey: this.mail.normalizeHeaderKey,
-                newline: this.mail.newline
-            });
-        } else {
-            node = parentNode.createChild('multipart/related; type="text/html"', {
-                disableUrlAccess: this.mail.disableUrlAccess,
-                disableFileAccess: this.mail.disableFileAccess,
-                normalizeHeaderKey: this.mail.normalizeHeaderKey,
-                newline: this.mail.newline
-            });
-        }
+        const node = parentNode
+            ? parentNode.createChild('multipart/related; type="text/html"', {
+                  disableUrlAccess: this.mail.disableUrlAccess,
+                  disableFileAccess: this.mail.disableFileAccess,
+                  normalizeHeaderKey: this.mail.normalizeHeaderKey,
+                  newline: this.mail.newline
+              })
+            : new MimeNode('multipart/related; type="text/html"', {
+                  baseBoundary: this.mail.baseBoundary,
+                  textEncoding: this.mail.textEncoding,
+                  boundaryPrefix: this.mail.boundaryPrefix,
+                  disableUrlAccess: this.mail.disableUrlAccess,
+                  disableFileAccess: this.mail.disableFileAccess,
+                  normalizeHeaderKey: this.mail.normalizeHeaderKey,
+                  newline: this.mail.newline
+              });
 
         this._createContentNode(node, this._htmlNode);
 
@@ -2476,33 +2426,30 @@ class MailComposer {
         element = element || {};
         element.content = element.content || '';
 
-        let node;
-        let encoding = (element.encoding || 'utf8')
+        const encoding = (element.encoding || 'utf8')
             .toString()
             .toLowerCase()
             .replace(/[-_\s]/g, '');
 
-        if (!parentNode) {
-            node = new MimeNode(element.contentType, {
-                filename: element.filename,
-                baseBoundary: this.mail.baseBoundary,
-                textEncoding: this.mail.textEncoding,
-                boundaryPrefix: this.mail.boundaryPrefix,
-                disableUrlAccess: this.mail.disableUrlAccess,
-                disableFileAccess: this.mail.disableFileAccess,
-                normalizeHeaderKey: this.mail.normalizeHeaderKey,
-                newline: this.mail.newline
-            });
-        } else {
-            node = parentNode.createChild(element.contentType, {
-                filename: element.filename,
-                textEncoding: this.mail.textEncoding,
-                disableUrlAccess: this.mail.disableUrlAccess,
-                disableFileAccess: this.mail.disableFileAccess,
-                normalizeHeaderKey: this.mail.normalizeHeaderKey,
-                newline: this.mail.newline
-            });
-        }
+        const node = parentNode
+            ? parentNode.createChild(element.contentType, {
+                  filename: element.filename,
+                  textEncoding: this.mail.textEncoding,
+                  disableUrlAccess: this.mail.disableUrlAccess,
+                  disableFileAccess: this.mail.disableFileAccess,
+                  normalizeHeaderKey: this.mail.normalizeHeaderKey,
+                  newline: this.mail.newline
+              })
+            : new MimeNode(element.contentType, {
+                  filename: element.filename,
+                  baseBoundary: this.mail.baseBoundary,
+                  textEncoding: this.mail.textEncoding,
+                  boundaryPrefix: this.mail.boundaryPrefix,
+                  disableUrlAccess: this.mail.disableUrlAccess,
+                  disableFileAccess: this.mail.disableFileAccess,
+                  normalizeHeaderKey: this.mail.normalizeHeaderKey,
+                  newline: this.mail.newline
+              });
 
         // add custom headers
         if (element.headers) {
@@ -2724,17 +2671,17 @@ class Mail extends EventEmitter {
                         this.getSocket = false;
                     }
                     return this.transporter[method](...args);
-                } else {
-                    this.logger.warn(
-                        {
-                            tnx: 'transport',
-                            methodName: method
-                        },
-                        'Non existing method %s called for transport',
-                        method
-                    );
-                    return false;
                 }
+
+                this.logger.warn(
+                    {
+                        tnx: 'transport',
+                        methodName: method
+                    },
+                    'Non existing method %s called for transport',
+                    method
+                );
+                return false;
             };
         });
 
@@ -2775,7 +2722,7 @@ class Mail extends EventEmitter {
             this.getSocket = false;
         }
 
-        let mail = new MailMessage(this, data);
+        const mail = new MailMessage(this, data);
 
         this.logger.debug(
             {
@@ -2825,7 +2772,7 @@ class Mail extends EventEmitter {
 
                 if (mail.data.dkim || this.dkim) {
                     mail.message.processFunc(input => {
-                        let dkim = mail.data.dkim ? new DKIM(mail.data.dkim) : this.dkim;
+                        const dkim = mail.data.dkim ? new DKIM(mail.data.dkim) : this.dkim;
                         this.logger.debug(
                             {
                                 tnx: 'DKIM',
@@ -2877,8 +2824,8 @@ class Mail extends EventEmitter {
             return callback();
         }
 
-        let userPlugins = this._userPlugins[step] || [];
-        let defaultPlugins = this._defaultPlugins[step] || [];
+        const userPlugins = this._userPlugins[step] || [];
+        const defaultPlugins = this._defaultPlugins[step] || [];
 
         if (userPlugins.length) {
             this.logger.debug(
@@ -2899,7 +2846,7 @@ class Mail extends EventEmitter {
 
         let pos = 0;
         let block = 'default';
-        let processPlugins = () => {
+        const processPlugins = () => {
             let curplugins = block === 'default' ? defaultPlugins : userPlugins;
             if (pos >= curplugins.length) {
                 if (block === 'default' && userPlugins.length) {
@@ -2910,7 +2857,7 @@ class Mail extends EventEmitter {
                     return callback();
                 }
             }
-            let plugin = curplugins[pos++];
+            const plugin = curplugins[pos++];
             plugin(mail, err => {
                 if (err) {
                     return callback(err);
@@ -2928,11 +2875,11 @@ class Mail extends EventEmitter {
      * @param {String} proxyUrl Proxy configuration url
      */
     setupProxy(proxyUrl) {
-        let proxy = urllib.parse(proxyUrl);
+        const proxy = urllib.parse(proxyUrl);
 
         // setup socket handler for the mailer object
         this.getSocket = (options, callback) => {
-            let protocol = proxy.protocol.replace(/:$/, '').toLowerCase();
+            const protocol = proxy.protocol.replace(/:$/, '').toLowerCase();
 
             if (this.meta.has('proxy_handler_' + protocol)) {
                 return this.meta.get('proxy_handler_' + protocol)(proxy, options, callback);
@@ -2960,11 +2907,11 @@ class Mail extends EventEmitter {
                         err.code = errors.EPROXY;
                         return callback(err);
                     }
-                    let connect = ipaddress => {
-                        let proxyV2 = !!this.meta.get('proxy_socks_module').SocksClient;
-                        let socksClient = proxyV2 ? this.meta.get('proxy_socks_module').SocksClient : this.meta.get('proxy_socks_module');
-                        let proxyType = Number(proxy.protocol.replace(/\D/g, '')) || 5;
-                        let connectionOpts = {
+                    const connect = ipaddress => {
+                        const proxyV2 = !!this.meta.get('proxy_socks_module').SocksClient;
+                        const socksClient = proxyV2 ? this.meta.get('proxy_socks_module').SocksClient : this.meta.get('proxy_socks_module');
+                        const proxyType = Number(proxy.protocol.replace(/\D/g, '')) || 5;
+                        const connectionOpts = {
                             proxy: {
                                 ipaddress,
                                 port: Number(proxy.port),
@@ -2978,8 +2925,8 @@ class Mail extends EventEmitter {
                         };
 
                         if (proxy.auth) {
-                            let username = decodeURIComponent(proxy.auth.split(':').shift());
-                            let password = decodeURIComponent(proxy.auth.split(':').pop());
+                            const username = decodeURIComponent(proxy.auth.split(':').shift());
+                            const password = decodeURIComponent(proxy.auth.split(':').pop());
                             if (proxyV2) {
                                 connectionOpts.proxy.userId = username;
                                 connectionOpts.proxy.password = password;
@@ -3025,31 +2972,39 @@ class Mail extends EventEmitter {
         if ((!this.options.attachDataUrls && !mail.data.attachDataUrls) || !mail.data.html) {
             return callback();
         }
-        mail.resolveContent(mail.data, 'html', (err, html) => {
-            if (err) {
-                return callback(err);
+        mail.resolveContent(
+            mail.data,
+            'html',
+            { disableFileAccess: mail.data.disableFileAccess, disableUrlAccess: mail.data.disableUrlAccess },
+            (err, html) => {
+                if (err) {
+                    return callback(err);
+                }
+                let cidCounter = 0;
+                html = (html || '')
+                    .toString()
+                    .replace(
+                        /(<img\b[^<>]{0,1024} src\s{0,20}=[\s"']{0,20})(data:([^;]+);[^"'>\s]+)/gi,
+                        (match, prefix, dataUri, mimeType) => {
+                            const cid = crypto.randomBytes(10).toString('hex') + '@localhost';
+                            if (!mail.data.attachments) {
+                                mail.data.attachments = [];
+                            }
+                            if (!Array.isArray(mail.data.attachments)) {
+                                mail.data.attachments = [].concat(mail.data.attachments || []);
+                            }
+                            mail.data.attachments.push({
+                                path: dataUri,
+                                cid,
+                                filename: 'image-' + ++cidCounter + '.' + mimeTypes.detectExtension(mimeType)
+                            });
+                            return prefix + 'cid:' + cid;
+                        }
+                    );
+                mail.data.html = html;
+                callback();
             }
-            let cidCounter = 0;
-            html = (html || '')
-                .toString()
-                .replace(/(<img\b[^<>]{0,1024} src\s{0,20}=[\s"']{0,20})(data:([^;]+);[^"'>\s]+)/gi, (match, prefix, dataUri, mimeType) => {
-                    let cid = crypto.randomBytes(10).toString('hex') + '@localhost';
-                    if (!mail.data.attachments) {
-                        mail.data.attachments = [];
-                    }
-                    if (!Array.isArray(mail.data.attachments)) {
-                        mail.data.attachments = [].concat(mail.data.attachments || []);
-                    }
-                    mail.data.attachments.push({
-                        path: dataUri,
-                        cid,
-                        filename: 'image-' + ++cidCounter + '.' + mimeTypes.detectExtension(mimeType)
-                    });
-                    return prefix + 'cid:' + cid;
-                });
-            mail.data.html = html;
-            callback();
-        });
+        );
     }
 
     set(key, value) {
@@ -3082,12 +3037,10 @@ class MailMessage {
         this.message = null;
 
         data = data || {};
-        let options = mailer.options || {};
-        let defaults = mailer._defaults || {};
+        const options = mailer.options || {};
+        const defaults = mailer._defaults || {};
 
-        Object.keys(data).forEach(key => {
-            this.data[key] = data[key];
-        });
+        Object.assign(this.data, data);
 
         this.data.headers = this.data.headers || {};
 
@@ -3118,7 +3071,7 @@ class MailMessage {
     }
 
     resolveAll(callback) {
-        let keys = [
+        const keys = [
             [this.data, 'html'],
             [this.data, 'text'],
             [this.data, 'watchHtml'],
@@ -3150,9 +3103,9 @@ class MailMessage {
             });
         }
 
-        let mimeNode = new MimeNode();
+        const mimeNode = new MimeNode();
 
-        let addressKeys = ['from', 'to', 'cc', 'bcc', 'sender', 'replyTo'];
+        const addressKeys = ['from', 'to', 'cc', 'bcc', 'sender', 'replyTo'];
 
         addressKeys.forEach(address => {
             let value;
@@ -3168,7 +3121,7 @@ class MailMessage {
             }
         });
 
-        let singleKeys = ['from', 'sender'];
+        const singleKeys = ['from', 'sender'];
         singleKeys.forEach(address => {
             if (this.data[address]) {
                 this.data[address] = this.data[address].shift();
@@ -3176,41 +3129,45 @@ class MailMessage {
         });
 
         let pos = 0;
-        let resolveNext = () => {
+        const resolveNext = () => {
             if (pos >= keys.length) {
                 return callback(null, this.data);
             }
-            let args = keys[pos++];
+            const args = keys[pos++];
             if (!args[0] || !args[0][args[1]]) {
                 return resolveNext();
             }
-            shared.resolveContent(...args, (err, value) => {
-                if (err) {
-                    return callback(err);
-                }
+            shared.resolveContent(
+                ...args,
+                { disableFileAccess: this.data.disableFileAccess, disableUrlAccess: this.data.disableUrlAccess },
+                (err, value) => {
+                    if (err) {
+                        return callback(err);
+                    }
 
-                let node = {
-                    content: value
-                };
-                if (args[0][args[1]] && typeof args[0][args[1]] === 'object' && !Buffer.isBuffer(args[0][args[1]])) {
-                    Object.keys(args[0][args[1]]).forEach(key => {
-                        if (!(key in node) && !['content', 'path', 'href', 'raw'].includes(key)) {
-                            node[key] = args[0][args[1]][key];
-                        }
-                    });
-                }
+                    const node = {
+                        content: value
+                    };
+                    if (args[0][args[1]] && typeof args[0][args[1]] === 'object' && !Buffer.isBuffer(args[0][args[1]])) {
+                        Object.keys(args[0][args[1]]).forEach(key => {
+                            if (!(key in node) && !['content', 'path', 'href', 'raw'].includes(key)) {
+                                node[key] = args[0][args[1]][key];
+                            }
+                        });
+                    }
 
-                args[0][args[1]] = node;
-                resolveNext();
-            });
+                    args[0][args[1]] = node;
+                    resolveNext();
+                }
+            );
         };
 
         setImmediate(() => resolveNext());
     }
 
     normalize(callback) {
-        let envelope = this.data.envelope || this.message.getEnvelope();
-        let messageId = this.message.messageId();
+        const envelope = this.data.envelope || this.message.getEnvelope();
+        const messageId = this.message.messageId();
 
         this.resolveAll((err, data) => {
             if (err) {
@@ -3266,7 +3223,7 @@ class MailMessage {
             });
 
             if (data.list && typeof data.list === 'object') {
-                let listHeaders = this._getListHeaders(data.list);
+                const listHeaders = this._getListHeaders(data.list);
                 listHeaders.forEach(entry => {
                     data.normalizedHeaders[entry.key] = entry.value.map(val => (val && val.value) || val).join(', ');
                 });
@@ -3316,13 +3273,11 @@ class MailMessage {
             return;
         }
         // add optional List-* headers
-        if (this.data.list && typeof this.data.list === 'object') {
-            this._getListHeaders(this.data.list).forEach(listHeader => {
-                listHeader.value.forEach(value => {
-                    this.message.addHeader(listHeader.key, value);
-                });
+        this._getListHeaders(this.data.list).forEach(listHeader => {
+            listHeader.value.forEach(value => {
+                this.message.addHeader(listHeader.key, value);
             });
-        }
+        });
     }
 
     _getListHeaders(listData) {
@@ -3344,7 +3299,8 @@ class MailMessage {
                         if (value && value.url) {
                             if (key.toLowerCase().trim() === 'id') {
                                 // List-ID: "comment" <domain>
-                                let comment = value.comment || '';
+                                // strip CR/LF so a comment can't inject extra header lines
+                                let comment = (value.comment || '').toString().replace(/\r?\n|\r/g, ' ');
                                 if (mimeFuncs.isPlainText(comment)) {
                                     comment = '"' + comment + '"';
                                 } else {
@@ -3355,7 +3311,8 @@ class MailMessage {
                             }
 
                             // List-*: <http://domain> (comment)
-                            let comment = value.comment || '';
+                            // strip CR/LF so a comment can't inject extra header lines
+                            let comment = (value.comment || '').toString().replace(/\r?\n|\r/g, ' ');
                             if (!mimeFuncs.isPlainText(comment)) {
                                 comment = mimeFuncs.encodeWord(comment);
                             }
@@ -3409,11 +3366,7 @@ module.exports = {
      */
     isPlainText(value, isParam) {
         const re = isParam ? /[\x00-\x08\x0b\x0c\x0e-\x1f"\u0080-\uFFFF]/ : /[\x00-\x08\x0b\x0c\x0e-\x1f\u0080-\uFFFF]/;
-        if (typeof value !== 'string' || re.test(value)) {
-            return false;
-        } else {
-            return true;
-        }
+        return typeof value === 'string' && !re.test(value);
     },
 
     /**
@@ -3448,7 +3401,7 @@ module.exports = {
         maxLength = maxLength || 0;
 
         let encodedStr;
-        let toCharset = 'UTF-8';
+        const toCharset = 'UTF-8';
 
         if (maxLength && maxLength > 7 + toCharset.length) {
             maxLength -= 7 + toCharset.length;
@@ -3457,12 +3410,11 @@ module.exports = {
         if (mimeWordEncoding === 'Q') {
             // https://tools.ietf.org/html/rfc2047#section-5 rule (3)
             encodedStr = qp.encode(data).replace(/[^a-z0-9!*+\-/=]/gi, chr => {
-                let ord = chr.charCodeAt(0).toString(16).toUpperCase();
+                const ord = chr.charCodeAt(0).toString(16).toUpperCase();
                 if (chr === ' ') {
                     return '_';
-                } else {
-                    return '=' + (ord.length === 1 ? '0' + ord : ord);
                 }
+                return '=' + (ord.length === 1 ? '0' + ord : ord);
             });
         } else if (mimeWordEncoding === 'B') {
             encodedStr = typeof data === 'string' ? data : base64.encode(data);
@@ -3474,7 +3426,7 @@ module.exports = {
                 encodedStr = this.splitMimeEncodedString(encodedStr, maxLength).join('?= =?' + toCharset + '?' + mimeWordEncoding + '?');
             } else {
                 // RFC2047 6.3 (2) states that encoded-word must include an integral number of characters, so no chopping unicode sequences
-                let parts = [];
+                const parts = [];
                 let lpart = '';
                 for (let i = 0, len = encodedStr.length; i < len; i++) {
                     let chr = encodedStr.charAt(i);
@@ -3523,42 +3475,38 @@ module.exports = {
     encodeWords(value, mimeWordEncoding, maxLength, encodeAll) {
         maxLength = maxLength || 0;
 
-        let encodedValue;
-
         // find first word with a non-printable ascii or special symbol in it
-        let firstMatch = value.match(/(?:^|\s)([^\s]*["\u0080-\uFFFF])/);
+        const firstMatch = value.match(/(?:^|\s)([^\s]*["\u0080-\uFFFF])/);
         if (!firstMatch) {
             return value;
         }
 
         if (encodeAll) {
             // if it is requested to encode everything or the string contains something that resebles encoded word, then encode everything
-
             return this.encodeWord(value, mimeWordEncoding, maxLength);
         }
 
         // find the last word with a non-printable ascii in it
-        let lastMatch = value.match(/(["\u0080-\uFFFF][^\s]*)[^"\u0080-\uFFFF]*$/);
+        const lastMatch = value.match(/(["\u0080-\uFFFF][^\s]*)[^"\u0080-\uFFFF]*$/);
         if (!lastMatch) {
             // should not happen
             return value;
         }
 
-        let startIndex =
+        const startIndex =
             firstMatch.index +
             (
                 firstMatch[0].match(/[^\s]/) || {
                     index: 0
                 }
             ).index;
-        let endIndex = lastMatch.index + (lastMatch[1] || '').length;
+        const endIndex = lastMatch.index + (lastMatch[1] || '').length;
 
-        encodedValue =
+        return (
             (startIndex ? value.substr(0, startIndex) : '') +
             this.encodeWord(value.substring(startIndex, endIndex), mimeWordEncoding || 'Q', maxLength) +
-            (endIndex < value.length ? value.substr(endIndex) : '');
-
-        return encodedValue;
+            (endIndex < value.length ? value.substr(endIndex) : '')
+        );
     },
 
     /**
@@ -3569,12 +3517,12 @@ module.exports = {
      * @return {String} joined header value
      */
     buildHeaderValue(structured) {
-        let paramsArray = [];
+        const paramsArray = [];
 
         Object.keys(structured.params || {}).forEach(param => {
             // filename might include unicode characters so it is a special case
             // other values probably do not
-            let value = structured.params[param];
+            const value = structured.params[param];
             if (!this.isPlainText(value, true) || value.length >= 75) {
                 this.buildHeaderParam(param, value, 50).forEach(encodedParam => {
                     if (!/[\s"\\;:/=(),<>@[\]?]|^[-']|'$/.test(encodedParam.value) || encodedParam.key.substr(-1) === '*') {
@@ -3609,9 +3557,8 @@ module.exports = {
      * @return {Array} A list of encoded keys and headers
      */
     buildHeaderParam(key, data, maxLength) {
-        let list = [];
+        const list = [];
         let encodedStr = typeof data === 'string' ? data : (data || '').toString();
-        let encodedStrArr;
         let chr, ord;
         let line;
         let startPos = 0;
@@ -3646,7 +3593,7 @@ module.exports = {
         } else {
             if (/[\uD800-\uDBFF]/.test(encodedStr)) {
                 // string containts surrogate pairs, so normalize it to an array of bytes
-                encodedStrArr = [];
+                const encodedStrArr = [];
                 for (i = 0, len = encodedStr.length; i < len; i++) {
                     chr = encodedStr.charAt(i);
                     ord = chr.charCodeAt(0);
@@ -3750,7 +3697,7 @@ module.exports = {
      * @return {Object} Header value as a parsed structure
      */
     parseHeaderValue(str) {
-        let response = {
+        const response = {
             value: false,
             params: {}
         };
@@ -3852,12 +3799,11 @@ module.exports = {
                         value
                             // fix invalidly encoded chars
                             .replace(/[=?_\s]/g, s => {
-                                let c = s.charCodeAt(0).toString(16);
+                                const c = s.charCodeAt(0).toString(16);
                                 if (s === ' ') {
                                     return '_';
-                                } else {
-                                    return '%' + (c.length < 2 ? '0' : '') + c;
                                 }
+                                return '%' + (c.length < 2 ? '0' : '') + c;
                             })
                             // change from urlencoding to percent encoding
                             .replace(/%/g, '=') +
@@ -3902,11 +3848,10 @@ module.exports = {
         str = (str || '').toString();
         lineLength = lineLength || 76;
 
-        let pos = 0,
-            len = str.length,
-            result = '',
-            line,
-            match;
+        let pos = 0;
+        const len = str.length;
+        let result = '';
+        let line, match;
 
         while (pos < len) {
             line = str.substr(pos, lineLength);
@@ -3943,11 +3888,8 @@ module.exports = {
      * @return {Array} Split string
      */
     splitMimeEncodedString: (str, maxlen) => {
-        let curLine,
-            match,
-            chr,
-            done,
-            lines = [];
+        const lines = [];
+        let curLine, match, chr, done;
 
         // require at least 12 symbols to fit possible 4 octet UTF-8 sequences
         maxlen = Math.max(maxlen || 0, 12);
@@ -6099,13 +6041,9 @@ module.exports = {
             return defaultMimeType;
         }
 
-        let parsed = path.parse(filename);
-        let extension = (parsed.ext.substr(1) || parsed.name || '').split('?').shift().trim().toLowerCase();
-        let value = defaultMimeType;
-
-        if (extensions.has(extension)) {
-            value = extensions.get(extension);
-        }
+        const parsed = path.parse(filename);
+        const extension = (parsed.ext.substr(1) || parsed.name || '').split('?').shift().trim().toLowerCase();
+        const value = extensions.has(extension) ? extensions.get(extension) : defaultMimeType;
 
         if (Array.isArray(value)) {
             return value[0];
@@ -6117,12 +6055,12 @@ module.exports = {
         if (!mimeType) {
             return defaultExtension;
         }
-        let parts = (mimeType || '').toLowerCase().trim().split('/');
-        let rootType = parts.shift().trim();
-        let subType = parts.join('/').trim();
+        const parts = (mimeType || '').toLowerCase().trim().split('/');
+        const rootType = parts.shift().trim();
+        const subType = parts.join('/').trim();
 
         if (mimeTypes.has(rootType + '/' + subType)) {
-            let value = mimeTypes.get(rootType + '/' + subType);
+            const value = mimeTypes.get(rootType + '/' + subType);
             if (Array.isArray(value)) {
                 return value[0];
             }
@@ -6151,7 +6089,7 @@ module.exports = {
 const crypto = __nccwpck_require__(6982);
 const fs = __nccwpck_require__(9896);
 const punycode = __nccwpck_require__(5014);
-const PassThrough = (__nccwpck_require__(2203).PassThrough);
+const { PassThrough } = __nccwpck_require__(2203);
 const shared = __nccwpck_require__(1284);
 
 const mimeFuncs = __nccwpck_require__(539);
@@ -6164,6 +6102,8 @@ const LastNewline = __nccwpck_require__(7275);
 
 const LeWindows = __nccwpck_require__(7793);
 const LeUnix = __nccwpck_require__(348);
+
+const FORMATTED_HEADERS = ['From', 'Sender', 'To', 'Cc', 'Bcc', 'Reply-To', 'Date', 'References'];
 
 /**
  * Creates a new mime tree node. Assumes 'multipart/*' as the content type
@@ -6200,7 +6140,7 @@ class MimeNode {
         /**
          * If date headers is missing and current node is the root, this value is used instead
          */
-        this.date = new Date();
+        this.date = options.parentNode ? null : new Date();
 
         /**
          * Root node for current mime tree
@@ -6321,7 +6261,7 @@ class MimeNode {
             options = contentType;
             contentType = undefined;
         }
-        let node = new MimeNode(contentType, options);
+        const node = new MimeNode(contentType, options);
         this.appendChild(node);
         return node;
     }
@@ -6402,8 +6342,7 @@ class MimeNode {
      * @return {Object} current node
      */
     setHeader(key, value) {
-        let added = false,
-            headerValue;
+        let added = false;
 
         // Allow setting multiple headers at once
         if (!value && key && typeof key === 'object') {
@@ -6426,7 +6365,7 @@ class MimeNode {
 
         key = this._normalizeHeaderKey(key);
 
-        headerValue = {
+        const headerValue = {
             key,
             value
         };
@@ -6550,8 +6489,8 @@ class MimeNode {
             });
         }
 
-        let stream = this.createReadStream();
-        let buf = [];
+        const stream = this.createReadStream();
+        const buf = [];
         let buflen = 0;
         let returned = false;
 
@@ -6591,7 +6530,7 @@ class MimeNode {
 
     getTransferEncoding() {
         let transferEncoding = false;
-        let contentType = (this.getHeader('Content-Type') || '').toString().toLowerCase().trim();
+        const contentType = (this.getHeader('Content-Type') || '').toString().toLowerCase().trim();
 
         if (this.content) {
             transferEncoding = (this.getHeader('Content-Transfer-Encoding') || '').toString().toLowerCase().trim();
@@ -6621,8 +6560,8 @@ class MimeNode {
      * @returns {String} Headers
      */
     buildHeaders() {
-        let transferEncoding = this.getTransferEncoding();
-        let headers = [];
+        const transferEncoding = this.getTransferEncoding();
+        const headers = [];
 
         if (transferEncoding) {
             this.setHeader('Content-Transfer-Encoding', transferEncoding);
@@ -6647,7 +6586,7 @@ class MimeNode {
 
             // Ensure that Content-Type is the last header for the root node
             for (let i = this._headers.length - 2; i >= 0; i--) {
-                let header = this._headers[i];
+                const header = this._headers[i];
                 if (header.key === 'Content-Type') {
                     this._headers.splice(i, 1);
                     this._headers.push(header);
@@ -6660,8 +6599,8 @@ class MimeNode {
             let value = header.value;
             let structured;
             let param;
-            let options = {};
-            let formattedHeaders = ['From', 'Sender', 'To', 'Cc', 'Bcc', 'Reply-To', 'Date', 'References'];
+            const options = {};
+            const formattedHeaders = FORMATTED_HEADERS;
 
             if (value && typeof value === 'object' && !formattedHeaders.includes(key)) {
                 Object.keys(value).forEach(key => {
@@ -6739,7 +6678,7 @@ class MimeNode {
             }
 
             if (typeof this.normalizeHeaderKey === 'function') {
-                let normalized = this.normalizeHeaderKey(key, value);
+                const normalized = this.normalizeHeaderKey(key, value);
                 if (normalized && typeof normalized === 'string' && normalized.length) {
                     key = normalized;
                 }
@@ -6760,7 +6699,7 @@ class MimeNode {
     createReadStream(options) {
         options = options || {};
 
-        let stream = new PassThrough(options);
+        const stream = new PassThrough(options);
         let outputStream = stream;
         let transform;
 
@@ -6828,13 +6767,13 @@ class MimeNode {
     }
 
     stream(outputStream, options, done) {
-        let transferEncoding = this.getTransferEncoding();
+        const transferEncoding = this.getTransferEncoding();
         let contentStream;
         let localStream;
 
         // protect actual callback against multiple triggering
         let returned = false;
-        let callback = err => {
+        const callback = err => {
             if (returned) {
                 return;
             }
@@ -6844,14 +6783,14 @@ class MimeNode {
 
         // for multipart nodes, push child nodes
         // for content nodes end the stream
-        let finalize = () => {
+        const finalize = () => {
             let childId = 0;
-            let processChildNode = () => {
+            const processChildNode = () => {
                 if (childId >= this.childNodes.length) {
                     outputStream.write('\r\n--' + this.boundary + '--\r\n');
                     return callback();
                 }
-                let child = this.childNodes[childId++];
+                const child = this.childNodes[childId++];
                 outputStream.write((childId > 1 ? '\r\n' : '') + '--' + this.boundary + '\r\n');
                 child.stream(outputStream, options, err => {
                     if (err) {
@@ -6869,7 +6808,7 @@ class MimeNode {
         };
 
         // pushes node content
-        let sendContent = () => {
+        const sendContent = () => {
             if (this.content) {
                 if (Object.prototype.toString.call(this.content) === '[object Error]') {
                     // content is already errored
@@ -6882,7 +6821,7 @@ class MimeNode {
                     this.content.once('error', this._contentErrorHandler);
                 }
 
-                let createStream = () => {
+                const createStream = () => {
                     if (['quoted-printable', 'base64'].includes(transferEncoding)) {
                         contentStream = new (transferEncoding === 'base64' ? base64 : qp).Encoder(options);
 
@@ -6907,10 +6846,10 @@ class MimeNode {
                 };
 
                 if (this.content._resolve) {
-                    let chunks = [];
+                    const chunks = [];
                     let chunklen = 0;
                     let returned = false;
-                    let sourceStream = this._getStream(this.content);
+                    const sourceStream = this._getStream(this.content);
                     sourceStream.on('error', err => {
                         if (returned) {
                             return;
@@ -6938,9 +6877,8 @@ class MimeNode {
                     setImmediate(createStream);
                 }
                 return;
-            } else {
-                return setImmediate(finalize);
             }
+            return setImmediate(finalize);
         };
 
         if (this._raw) {
@@ -6955,7 +6893,7 @@ class MimeNode {
                     this._raw.removeListener('error', this._contentErrorHandler);
                 }
 
-                let raw = this._getStream(this._raw);
+                const raw = this._getStream(this._raw);
                 raw.pipe(outputStream, {
                     end: false
                 });
@@ -6997,7 +6935,7 @@ class MimeNode {
 
         this._envelope.to = this._envelope.to.map(to => to.address).filter(address => address);
 
-        let standardFields = ['to', 'cc', 'bcc', 'from'];
+        const standardFields = ['to', 'cc', 'bcc', 'from'];
         Object.keys(envelope).forEach(key => {
             if (!standardFields.includes(key)) {
                 this._envelope[key] = envelope[key];
@@ -7013,10 +6951,10 @@ class MimeNode {
      * @return {Object} Address object
      */
     getAddresses() {
-        let addresses = {};
+        const addresses = {};
 
         this._headers.forEach(header => {
-            let key = header.key.toLowerCase();
+            const key = header.key.toLowerCase();
             if (['from', 'sender', 'reply-to', 'to', 'cc', 'bcc'].includes(key)) {
                 if (!Array.isArray(addresses[key])) {
                     addresses[key] = [];
@@ -7039,12 +6977,12 @@ class MimeNode {
             return this._envelope;
         }
 
-        let envelope = {
+        const envelope = {
             from: false,
             to: []
         };
         this._headers.forEach(header => {
-            let list = [];
+            const list = [];
             if (header.key === 'From' || (!envelope.from && ['Reply-To', 'Sender'].includes(header.key))) {
                 this._convertAddresses(this._parseAddresses(header.value), list);
                 if (list.length && list[0]) {
@@ -7120,14 +7058,18 @@ class MimeNode {
             });
 
             return contentStream;
-        } else if (typeof content.pipe === 'function') {
+        }
+
+        if (typeof content.pipe === 'function') {
             // assume as stream
             return content;
-        } else if (content && typeof content.path === 'string' && !content.href) {
+        }
+
+        if (content && typeof content.path === 'string' && !content.href) {
             if (this.disableFileAccess) {
                 contentStream = new PassThrough();
                 setImmediate(() => {
-                    let err = new Error('File access rejected for ' + content.path);
+                    const err = new Error('File access rejected for ' + content.path);
                     err.code = errors.EFILEACCESS;
                     contentStream.emit('error', err);
                 });
@@ -7135,11 +7077,13 @@ class MimeNode {
             }
             // read file
             return fs.createReadStream(content.path);
-        } else if (content && typeof content.href === 'string') {
+        }
+
+        if (content && typeof content.href === 'string') {
             if (this.disableUrlAccess) {
                 contentStream = new PassThrough();
                 setImmediate(() => {
-                    let err = new Error('Url access rejected for ' + content.href);
+                    const err = new Error('Url access rejected for ' + content.href);
                     err.code = errors.EURLACCESS;
                     contentStream.emit('error', err);
                 });
@@ -7147,19 +7091,19 @@ class MimeNode {
             }
             // fetch URL
             return nmfetch(content.href, { headers: content.httpHeaders });
-        } else {
-            // pass string or buffer content as a stream
-            contentStream = new PassThrough();
-
-            setImmediate(() => {
-                try {
-                    contentStream.end(content || '');
-                } catch (_err) {
-                    contentStream.emit('error', _err);
-                }
-            });
-            return contentStream;
         }
+
+        // pass string or buffer content as a stream
+        contentStream = new PassThrough();
+
+        setImmediate(() => {
+            try {
+                contentStream.end(content || '');
+            } catch (_err) {
+                contentStream.emit('error', _err);
+            }
+        });
+        return contentStream;
     }
 
     /**
@@ -7318,7 +7262,7 @@ class MimeNode {
      * @return {String} address string
      */
     _convertAddresses(addresses, uniqueList) {
-        let values = [];
+        const values = [];
 
         uniqueList = uniqueList || [];
 
@@ -7328,17 +7272,15 @@ class MimeNode {
 
                 if (!address.name) {
                     values.push(address.address.indexOf(' ') >= 0 ? `<${address.address}>` : `${address.address}`);
-                } else if (address.name) {
+                } else {
                     values.push(`${this._encodeAddressName(address.name)} <${address.address}>`);
                 }
 
-                if (address.address) {
-                    if (!uniqueList.filter(a => a.address === address.address).length) {
-                        uniqueList.push(address);
-                    }
+                if (!uniqueList.some(a => a.address === address.address)) {
+                    uniqueList.push(address);
                 }
             } else if (address.group) {
-                let groupListAddresses = (address.group.length ? this._convertAddresses(address.group, uniqueList) : '').trim();
+                const groupListAddresses = (address.group.length ? this._convertAddresses(address.group, uniqueList) : '').trim();
                 values.push(`${this._encodeAddressName(address.name)}:${groupListAddresses};`);
             }
         });
@@ -7358,26 +7300,30 @@ class MimeNode {
             .replace(/[\x00-\x1F<>]+/g, ' ') // remove unallowed characters
             .trim();
 
-        let lastAt = address.lastIndexOf('@');
+        const lastAt = address.lastIndexOf('@');
         if (lastAt < 0) {
             // Bare username
             return address;
         }
 
         let user = address.substr(0, lastAt);
-        let domain = address.substr(lastAt + 1);
+        const domain = address.substr(lastAt + 1);
 
-        // Usernames are not touched and are kept as is even if these include unicode
-        // Domains are punycoded by default
-        // 'jõgeva.ee' will be converted to 'xn--jgeva-dua.ee'
-        // non-unicode domains are left as is
+        // Usernames are not touched and are kept as is even if these include unicode.
+        // Domains are punycoded when the local part is ASCII ('safe@jõgeva.ee' -> 'safe@xn--jgeva-dua.ee').
+        // When the local part contains non-ASCII bytes the address already requires SMTPUTF8,
+        // so the domain is kept (or decoded back) as UTF-8 for symmetry on both sides of '@'.
 
-        let encodedDomain;
+        let encodedDomain = domain;
 
         try {
-            encodedDomain = punycode.toASCII(domain.toLowerCase());
+            if (/[\x80-\uFFFF]/.test(user)) {
+                encodedDomain = punycode.toUnicode(domain.toLowerCase());
+            } else {
+                encodedDomain = punycode.toASCII(domain.toLowerCase());
+            }
         } catch (_err) {
-            // keep as is?
+            // keep domain as supplied
         }
 
         if (user.indexOf(' ') >= 0) {
@@ -7431,20 +7377,25 @@ class MimeNode {
     _getTextEncoding(value) {
         value = (value || '').toString();
 
-        let encoding = this.textEncoding;
-        let latinLen;
-        let nonLatinLen;
-
-        if (!encoding) {
-            // count latin alphabet symbols and 8-bit range symbols + control symbols
-            // if there are more latin characters, then use quoted-printable
-            // encoding, otherwise use base64
-            nonLatinLen = (value.match(/[\x00-\x08\x0B\x0C\x0E-\x1F\u0080-\uFFFF]/g) || []).length;
-            latinLen = (value.match(/[a-z]/gi) || []).length;
-            // if there are more latin symbols than binary/unicode, then prefer Q, otherwise B
-            encoding = nonLatinLen < latinLen ? 'Q' : 'B';
+        if (this.textEncoding) {
+            return this.textEncoding;
         }
-        return encoding;
+
+        // count latin alphabet symbols and 8-bit range symbols + control symbols
+        // if there are more latin characters, then use quoted-printable
+        // encoding, otherwise use base64
+        let nonLatinLen = 0;
+        let latinLen = 0;
+        for (let i = 0, len = value.length; i < len; i++) {
+            const code = value.charCodeAt(i);
+            if ((code >= 0x00 && code <= 0x08) || code === 0x0b || code === 0x0c || (code >= 0x0e && code <= 0x1f) || code >= 0x80) {
+                nonLatinLen++;
+            } else if ((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)) {
+                latinLen++;
+            }
+        }
+        // if there are more latin symbols than binary/unicode, then prefer Q, otherwise B
+        return nonLatinLen < latinLen ? 'Q' : 'B';
     }
 
     /**
@@ -7478,7 +7429,7 @@ module.exports = MimeNode;
 
 
 
-const Transform = (__nccwpck_require__(2203).Transform);
+const { Transform } = __nccwpck_require__(2203);
 
 class LastNewline extends Transform {
     constructor() {
@@ -7518,19 +7469,16 @@ module.exports = LastNewline;
 
 
 
-const stream = __nccwpck_require__(2203);
-const Transform = stream.Transform;
+const { Transform } = __nccwpck_require__(2203);
 
 /**
  * Ensures that only <LF> is used for linebreaks
  *
  * @param {Object} options Stream options
  */
-class LeWindows extends Transform {
+class LeUnix extends Transform {
     constructor(options) {
         super(options);
-        // init Transform
-        this.options = options || {};
     }
 
     /**
@@ -7542,7 +7490,7 @@ class LeWindows extends Transform {
 
         for (let i = 0, len = chunk.length; i < len; i++) {
             if (chunk[i] === 0x0d) {
-                // \n
+                // \r
                 buf = chunk.slice(lastPos, i);
                 lastPos = i + 1;
                 this.push(buf);
@@ -7558,7 +7506,7 @@ class LeWindows extends Transform {
     }
 }
 
-module.exports = LeWindows;
+module.exports = LeUnix;
 
 
 /***/ }),
@@ -7568,8 +7516,7 @@ module.exports = LeWindows;
 
 
 
-const stream = __nccwpck_require__(2203);
-const Transform = stream.Transform;
+const { Transform } = __nccwpck_require__(2203);
 
 /**
  * Ensures that only <CR><LF> sequences are used for linebreaks
@@ -7579,8 +7526,6 @@ const Transform = stream.Transform;
 class LeWindows extends Transform {
     constructor(options) {
         super(options);
-        // init Transform
-        this.options = options || {};
         this.lastByte = false;
     }
 
@@ -7647,9 +7592,7 @@ const ETHEREAL_CACHE = ['true', 'yes', 'y', '1'].includes((process.env.ETHEREAL_
 let testAccount = false;
 
 module.exports.createTransport = function (transporter, defaults) {
-    let urlConfig;
     let options;
-    let mailer;
 
     if (
         // provided transporter is a configuration object, not transporter plugin
@@ -7657,7 +7600,8 @@ module.exports.createTransport = function (transporter, defaults) {
         // provided transporter looks like a connection url
         (typeof transporter === 'string' && /^(smtps?|direct):/i.test(transporter))
     ) {
-        if ((urlConfig = typeof transporter === 'string' ? transporter : transporter.url)) {
+        const urlConfig = typeof transporter === 'string' ? transporter : transporter.url;
+        if (urlConfig) {
             // parse a configuration URL into configuration options
             options = shared.parseConnectionUrl(urlConfig);
         } else {
@@ -7674,7 +7618,7 @@ module.exports.createTransport = function (transporter, defaults) {
             transporter = new JSONTransport(options);
         } else if (options.SES) {
             if (options.SES.ses && options.SES.aws) {
-                let error = new Error(
+                const error = new Error(
                     'Using legacy SES configuration, expecting @aws-sdk/client-sesv2, see https://nodemailer.com/transports/ses/'
                 );
                 error.code = errors.ECONFIG;
@@ -7686,9 +7630,7 @@ module.exports.createTransport = function (transporter, defaults) {
         }
     }
 
-    mailer = new Mailer(transporter, options, defaults);
-
-    return mailer;
+    return new Mailer(transporter, options, defaults);
 };
 
 module.exports.createTestAccount = function (apiUrl, callback) {
@@ -7712,11 +7654,11 @@ module.exports.createTestAccount = function (apiUrl, callback) {
 
     apiUrl = apiUrl || ETHEREAL_API;
 
-    let chunks = [];
+    const chunks = [];
     let chunklen = 0;
 
-    let requestHeaders = {};
-    let requestBody = {
+    const requestHeaders = {};
+    const requestBody = {
         requestor: packageData.name,
         version: packageData.version
     };
@@ -7725,12 +7667,22 @@ module.exports.createTestAccount = function (apiUrl, callback) {
         requestHeaders.Authorization = 'Bearer ' + ETHEREAL_API_KEY;
     }
 
-    let req = nmfetch(apiUrl + '/user', {
+    const fetchOptions = {
         contentType: 'application/json',
         method: 'POST',
         headers: requestHeaders,
         body: Buffer.from(JSON.stringify(requestBody))
-    });
+    };
+
+    // Credential-bearing request — opt back into strict cert validation when
+    // the API URL is HTTPS. lib/fetch defaults to rejectUnauthorized:false
+    // for attachment hosts that may be self-signed; the Ethereal API has a
+    // real cert, so the lax default was a free attack surface.
+    if (/^https:/i.test(apiUrl)) {
+        fetchOptions.tls = { rejectUnauthorized: true };
+    }
+
+    const req = nmfetch(apiUrl + '/user', fetchOptions);
 
     req.on('readable', () => {
         let chunk;
@@ -7743,16 +7695,12 @@ module.exports.createTestAccount = function (apiUrl, callback) {
     req.once('error', err => callback(err));
 
     req.once('end', () => {
-        let res = Buffer.concat(chunks, chunklen);
+        const res = Buffer.concat(chunks, chunklen);
         let data;
-        let err;
         try {
             data = JSON.parse(res.toString());
         } catch (E) {
-            err = E;
-        }
-        if (err) {
-            return callback(err);
+            return callback(E);
         }
         if (data.status !== 'success' || data.error) {
             return callback(new Error(data.error || 'Request failed'));
@@ -7770,7 +7718,7 @@ module.exports.getTestMessageUrl = function (info) {
         return false;
     }
 
-    let infoProps = new Map();
+    const infoProps = new Map();
     info.response.replace(/\[([^\]]+)\]$/, (m, props) => {
         props.replace(/\b([A-Z0-9]+)=([^\s]+)/g, (m, key, value) => {
             infoProps.set(key, value);
@@ -8259,7 +8207,7 @@ module.exports = punycode;
 
 
 
-const Transform = (__nccwpck_require__(2203).Transform);
+const { Transform } = __nccwpck_require__(2203);
 
 /**
  * Encodes a Buffer into a Quoted-Printable encoded string
@@ -8267,20 +8215,21 @@ const Transform = (__nccwpck_require__(2203).Transform);
  * @param {Buffer} buffer Buffer to convert
  * @returns {String} Quoted-Printable encoded string
  */
+// usable characters that do not need encoding
+// https://tools.ietf.org/html/rfc2045#section-6.7
+const QP_RANGES = [
+    [0x09], // <TAB>
+    [0x0a], // <LF>
+    [0x0d], // <CR>
+    [0x20, 0x3c], // <SP>!"#$%&'()*+,-./0123456789:;
+    [0x3e, 0x7e] // >?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}
+];
+
 function encode(buffer) {
     if (typeof buffer === 'string') {
         buffer = Buffer.from(buffer, 'utf-8');
     }
 
-    // usable characters that do not need encoding
-    let ranges = [
-        // https://tools.ietf.org/html/rfc2045#section-6.7
-        [0x09], // <TAB>
-        [0x0a], // <LF>
-        [0x0d], // <CR>
-        [0x20, 0x3c], // <SP>!"#$%&'()*+,-./0123456789:;
-        [0x3e, 0x7e] // >?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}
-    ];
     let result = '';
     let ord;
 
@@ -8288,7 +8237,7 @@ function encode(buffer) {
         ord = buffer[i];
         // if the char is in allowed range, then keep as is, unless it is a WS in the end of a line
         if (
-            checkRanges(ord, ranges) &&
+            checkRanges(ord, QP_RANGES) &&
             !((ord === 0x20 || ord === 0x09) && (i === len - 1 || buffer[i + 1] === 0x0a || buffer[i + 1] === 0x0d))
         ) {
             result += String.fromCharCode(ord);
@@ -8316,9 +8265,9 @@ function wrap(str, lineLength) {
     }
 
     let pos = 0;
-    let len = str.length;
+    const len = str.length;
     let match, code, line;
-    let lineMargin = Math.floor(lineLength / 3);
+    const lineMargin = Math.floor(lineLength / 3);
     let result = '';
 
     // insert soft linebreaks where needed
@@ -8332,17 +8281,20 @@ function wrap(str, lineLength) {
         }
 
         if (line.substr(-1) === '\n') {
-            // nothing to change here
             result += line;
             pos += line.length;
             continue;
-        } else if ((match = line.substr(-lineMargin).match(/\n.*?$/))) {
+        }
+
+        if ((match = line.substr(-lineMargin).match(/\n.*?$/))) {
             // truncate to nearest line break
             line = line.substr(0, line.length - (match[0].length - 1));
             result += line;
             pos += line.length;
             continue;
-        } else if (line.length > lineLength - lineMargin && (match = line.substr(-lineMargin).match(/[ \t.,!?][^ \t.,!?]*$/))) {
+        }
+
+        if (line.length > lineLength - lineMargin && (match = line.substr(-lineMargin).match(/[ \t.,!?][^ \t.,!?]*$/))) {
             // truncate to nearest space
             line = line.substr(0, line.length - (match[0].length - 1));
         } else if (line.match(/[=][\da-f]{0,2}$/i)) {
@@ -8398,13 +8350,14 @@ function wrap(str, lineLength) {
  */
 function checkRanges(nr, ranges) {
     for (let i = ranges.length - 1; i >= 0; i--) {
-        if (!ranges[i].length) {
+        const range = ranges[i];
+        if (!range.length) {
             continue;
         }
-        if (ranges[i].length === 1 && nr === ranges[i][0]) {
+        if (range.length === 1 && nr === range[0]) {
             return true;
         }
-        if (ranges[i].length === 2 && nr >= ranges[i][0] && nr <= ranges[i][1]) {
+        if (range.length === 2 && nr >= range[0] && nr <= range[1]) {
             return true;
         }
     }
@@ -8422,7 +8375,6 @@ class Encoder extends Transform {
     constructor(options) {
         super();
 
-        // init Transform
         this.options = options || {};
 
         if (this.options.lineLength !== false) {
@@ -8478,7 +8430,6 @@ class Encoder extends Transform {
     }
 }
 
-// expose to the world
 module.exports = {
     encode,
     wrap,
@@ -8493,7 +8444,7 @@ module.exports = {
 
 
 
-const spawn = (__nccwpck_require__(5317).spawn);
+const { spawn } = __nccwpck_require__(5317);
 const packageData = __nccwpck_require__(6710);
 const shared = __nccwpck_require__(1284);
 const errors = __nccwpck_require__(7633);
@@ -8517,30 +8468,26 @@ class SendmailTransport {
         // use a reference to spawn for mocking purposes
         this._spawn = spawn;
 
-        this.options = options || {};
+        this.options = options;
 
         this.name = 'Sendmail';
         this.version = packageData.version;
 
         this.path = 'sendmail';
         this.args = false;
-        this.winbreak = false;
 
         this.logger = shared.getLogger(this.options, {
             component: this.options.component || 'sendmail'
         });
 
-        if (options) {
-            if (typeof options === 'string') {
-                this.path = options;
-            } else if (typeof options === 'object') {
-                if (options.path) {
-                    this.path = options.path;
-                }
-                if (Array.isArray(options.args)) {
-                    this.args = options.args;
-                }
-                this.winbreak = ['win', 'windows', 'dos', '\r\n'].includes((options.newline || '').toString().toLowerCase());
+        if (typeof options === 'string') {
+            this.path = options;
+        } else if (typeof options === 'object') {
+            if (options.path) {
+                this.path = options.path;
+            }
+            if (Array.isArray(options.args)) {
+                this.args = options.args;
             }
         }
     }
@@ -8555,10 +8502,8 @@ class SendmailTransport {
         // Sendmail strips this header line by itself
         mail.message.keepBcc = true;
 
-        let envelope = mail.data.envelope || mail.message.getEnvelope();
-        let messageId = mail.message.messageId();
-        let args;
-        let sendmail;
+        const envelope = mail.data.envelope || mail.message.getEnvelope();
+        const messageId = mail.message.messageId();
         let returned;
 
         const hasInvalidAddresses = []
@@ -8566,19 +8511,17 @@ class SendmailTransport {
             .concat(envelope.to || [])
             .some(addr => /^-/.test(addr));
         if (hasInvalidAddresses) {
-            let err = new Error('Can not send mail. Invalid envelope addresses.');
+            const err = new Error('Can not send mail. Invalid envelope addresses.');
             err.code = errors.ESENDMAIL;
             return done(err);
         }
 
-        if (this.args) {
-            // force -i to keep single dots
-            args = ['-i'].concat(this.args).concat(envelope.to);
-        } else {
-            args = ['-i'].concat(envelope.from ? ['-f', envelope.from] : []).concat(envelope.to);
-        }
+        // force -i to keep single dots
+        const args = this.args
+            ? ['-i'].concat(this.args).concat(envelope.to)
+            : ['-i'].concat(envelope.from ? ['-f', envelope.from] : []).concat(envelope.to);
 
-        let callback = err => {
+        const callback = err => {
             if (returned) {
                 // ignore any additional responses, already done
                 return;
@@ -8587,16 +8530,16 @@ class SendmailTransport {
             if (typeof done === 'function') {
                 if (err) {
                     return done(err);
-                } else {
-                    return done(null, {
-                        envelope: mail.data.envelope || mail.message.getEnvelope(),
-                        messageId,
-                        response: 'Messages queued for delivery'
-                    });
                 }
+                return done(null, {
+                    envelope,
+                    messageId,
+                    response: 'Messages queued for delivery'
+                });
             }
         };
 
+        let sendmail;
         try {
             sendmail = this._spawn(this.path, args);
         } catch (E) {
@@ -8631,12 +8574,9 @@ class SendmailTransport {
                 if (!code) {
                     return callback();
                 }
-                let err;
-                if (code === 127) {
-                    err = new Error('Sendmail command not found, process exited with code ' + code);
-                } else {
-                    err = new Error('Sendmail exited with code ' + code);
-                }
+                const err = new Error(
+                    code === 127 ? 'Sendmail command not found, process exited with code ' + code : 'Sendmail exited with code ' + code
+                );
                 err.code = errors.ESENDMAIL;
 
                 this.logger.error(
@@ -8667,7 +8607,7 @@ class SendmailTransport {
                 callback(err);
             });
 
-            let recipients = [].concat(envelope.to || []);
+            const recipients = [].concat(envelope.to || []);
             if (recipients.length > 3) {
                 recipients.push('...and ' + recipients.splice(2).length + ' more');
             }
@@ -8681,7 +8621,7 @@ class SendmailTransport {
                 recipients.join(', ')
             );
 
-            let sourceStream = mail.message.createReadStream();
+            const sourceStream = mail.message.createReadStream();
             sourceStream.once('error', err => {
                 this.logger.error(
                     {
@@ -8699,7 +8639,7 @@ class SendmailTransport {
 
             sourceStream.pipe(sendmail.stdin);
         } else {
-            let err = new Error('sendmail was not found');
+            const err = new Error('sendmail was not found');
             err.code = errors.ESENDMAIL;
             return callback(err);
         }
@@ -8733,7 +8673,7 @@ class SESTransport extends EventEmitter {
         super();
         options = options || {};
 
-        this.options = options || {};
+        this.options = options;
         this.ses = this.options.SES;
 
         this.name = 'SESTransport';
@@ -8762,21 +8702,16 @@ class SESTransport extends EventEmitter {
      * @param {Function} callback Callback function to run when the sending is completed
      */
     send(mail, callback) {
-        let statObject = {
-            ts: Date.now(),
-            pending: true
-        };
-
         let fromHeader = mail.message._headers.find(header => /^from$/i.test(header.key));
         if (fromHeader) {
-            let mimeNode = new MimeNode('text/plain');
+            const mimeNode = new MimeNode('text/plain');
             fromHeader = mimeNode._convertAddresses(mimeNode._parseAddresses(fromHeader.value));
         }
 
-        let envelope = mail.data.envelope || mail.message.getEnvelope();
-        let messageId = mail.message.messageId();
+        const envelope = mail.data.envelope || mail.message.getEnvelope();
+        const messageId = mail.message.messageId();
 
-        let recipients = [].concat(envelope.to || []);
+        const recipients = [].concat(envelope.to || []);
         if (recipients.length > 3) {
             recipients.push('...and ' + recipients.splice(2).length + ' more');
         }
@@ -8790,7 +8725,7 @@ class SESTransport extends EventEmitter {
             recipients.join(', ')
         );
 
-        let getRawMessage = next => {
+        const getRawMessage = next => {
             // do not use Message-ID and Date in DKIM signature
             if (!mail.data._dkim) {
                 mail.data._dkim = {};
@@ -8801,9 +8736,9 @@ class SESTransport extends EventEmitter {
                 mail.data._dkim.skipFields = 'date:message-id';
             }
 
-            let sourceStream = mail.message.createReadStream();
-            let stream = sourceStream.pipe(new LeWindows());
-            let chunks = [];
+            const sourceStream = mail.message.createReadStream();
+            const stream = sourceStream.pipe(new LeWindows());
+            const chunks = [];
             let chunklen = 0;
 
             stream.on('readable', () => {
@@ -8816,9 +8751,7 @@ class SESTransport extends EventEmitter {
 
             sourceStream.once('error', err => stream.emit('error', err));
 
-            stream.once('error', err => {
-                next(err);
-            });
+            stream.once('error', err => next(err));
 
             stream.once('end', () => next(null, Buffer.concat(chunks, chunklen)));
         };
@@ -8836,26 +8769,24 @@ class SESTransport extends EventEmitter {
                         messageId,
                         err.message
                     );
-                    statObject.pending = false;
                     return callback(err);
                 }
 
-                let sesMessage = {
-                    Content: {
-                        Raw: {
-                            // required
-                            Data: raw // required
+                const sesMessage = Object.assign(
+                    {
+                        Content: {
+                            Raw: {
+                                // required
+                                Data: raw // required
+                            }
+                        },
+                        FromEmailAddress: fromHeader || envelope.from,
+                        Destination: {
+                            ToAddresses: envelope.to
                         }
                     },
-                    FromEmailAddress: fromHeader ? fromHeader : envelope.from,
-                    Destination: {
-                        ToAddresses: envelope.to
-                    }
-                };
-
-                Object.keys(mail.data.ses || {}).forEach(key => {
-                    sesMessage[key] = mail.data.ses[key];
-                });
+                    mail.data.ses || {}
+                );
 
                 this.getRegion((err, region) => {
                     if (err || !region) {
@@ -8871,7 +8802,6 @@ class SESTransport extends EventEmitter {
                                 region = 'email';
                             }
 
-                            statObject.pending = true;
                             callback(null, {
                                 envelope: {
                                     from: envelope.from,
@@ -8892,7 +8822,6 @@ class SESTransport extends EventEmitter {
                                 messageId,
                                 err.message
                             );
-                            statObject.pending = false;
                             callback(err);
                         });
                 });
@@ -8963,6 +8892,7 @@ const urllib = __nccwpck_require__(7016);
 const util = __nccwpck_require__(9023);
 const fs = __nccwpck_require__(9896);
 const nmfetch = __nccwpck_require__(943);
+const errors = __nccwpck_require__(7633);
 const dns = __nccwpck_require__(2250);
 const net = __nccwpck_require__(9278);
 const os = __nccwpck_require__(857);
@@ -8987,34 +8917,28 @@ try {
 module.exports.networkInterfaces = networkInterfaces;
 
 const isFamilySupported = (family, allowInternal) => {
-    let networkInterfaces = module.exports.networkInterfaces;
-    if (!networkInterfaces) {
+    const ifaces = module.exports.networkInterfaces;
+    if (!ifaces) {
         // hope for the best
         return true;
     }
 
-    const familySupported =
-        // crux that replaces Object.values(networkInterfaces) as Object.values is not supported in nodejs v6
-        Object.keys(networkInterfaces)
-            .map(key => networkInterfaces[key])
-            // crux that replaces .flat() as it is not supported in older Node versions (v10 and older)
-            .reduce((acc, val) => acc.concat(val), [])
-            .filter(i => !i.internal || allowInternal)
-            .filter(i => i.family === 'IPv' + family || i.family === family).length > 0;
-
-    return familySupported;
+    return Object.keys(ifaces)
+        .map(key => ifaces[key])
+        .reduce((acc, val) => acc.concat(val), [])
+        .filter(i => !i.internal || allowInternal)
+        .some(i => i.family === 'IPv' + family || i.family === family);
 };
 
-const resolver = (family, hostname, options, callback) => {
+const resolve = (family, hostname, options, callback) => {
     options = options || {};
-    const familySupported = isFamilySupported(family, options.allowInternalNetworkInterfaces);
 
-    if (!familySupported) {
+    if (!isFamilySupported(family, options.allowInternalNetworkInterfaces)) {
         return callback(null, []);
     }
 
-    const resolver = dns.Resolver ? new dns.Resolver(options) : dns;
-    resolver['resolve' + family](hostname, (err, addresses) => {
+    const dnsResolver = dns.Resolver ? new dns.Resolver(options) : dns;
+    dnsResolver['resolve' + family](hostname, (err, addresses) => {
         if (err) {
             switch (err.code) {
                 case dns.NODATA:
@@ -9039,15 +8963,10 @@ const formatDNSValue = (value, extra) => {
         return Object.assign({}, extra || {});
     }
 
-    let addresses = value.addresses || [];
+    const addresses = value.addresses || [];
 
     // Select a random address from available addresses, or null if none
-    let host = null;
-    if (addresses.length === 1) {
-        host = addresses[0];
-    } else if (addresses.length > 1) {
-        host = addresses[Math.floor(Math.random() * addresses.length)];
-    }
+    const host = addresses.length > 0 ? addresses[Math.floor(Math.random() * addresses.length)] : null;
 
     return Object.assign(
         {
@@ -9069,7 +8988,7 @@ module.exports.resolveHostname = (options, callback) => {
 
     if (!options.host || net.isIP(options.host)) {
         // nothing to do here
-        let value = {
+        const value = {
             addresses: [options.host],
             servername: options.servername || false
         };
@@ -9121,14 +9040,14 @@ module.exports.resolveHostname = (options, callback) => {
     let ipv4Error = null;
     let ipv6Error = null;
 
-    resolver(4, options.host, options, (err, addresses) => {
+    resolve(4, options.host, options, (err, addresses) => {
         if (err) {
             ipv4Error = err;
         } else {
             ipv4Addresses = addresses || [];
         }
 
-        resolver(6, options.host, options, (err, addresses) => {
+        resolve(6, options.host, options, (err, addresses) => {
             if (err) {
                 ipv6Error = err;
             } else {
@@ -9136,10 +9055,10 @@ module.exports.resolveHostname = (options, callback) => {
             }
 
             // Combine addresses: IPv4 first, then IPv6
-            let allAddresses = ipv4Addresses.concat(ipv6Addresses);
+            const allAddresses = ipv4Addresses.concat(ipv6Addresses);
 
             if (allAddresses.length) {
-                let value = {
+                const value = {
                     addresses: allAddresses,
                     servername: options.servername || options.host
                 };
@@ -9197,7 +9116,7 @@ module.exports.resolveHostname = (options, callback) => {
                     }
 
                     // Get all supported addresses from dns.lookup
-                    let supportedAddresses = addresses
+                    const supportedAddresses = addresses
                         ? addresses.filter(addr => isFamilySupported(addr.family)).map(addr => addr.address)
                         : [];
 
@@ -9216,7 +9135,7 @@ module.exports.resolveHostname = (options, callback) => {
                         );
                     }
 
-                    let value = {
+                    const value = {
                         addresses: supportedAddresses.length ? supportedAddresses : [options.host],
                         servername: options.servername || options.host
                     };
@@ -9261,97 +9180,89 @@ module.exports.resolveHostname = (options, callback) => {
  */
 module.exports.parseConnectionUrl = str => {
     str = str || '';
-    let options = {};
+    const options = {};
+    const url = urllib.parse(str, true);
 
-    [urllib.parse(str, true)].forEach(url => {
-        let auth;
+    switch (url.protocol) {
+        case 'smtp:':
+            options.secure = false;
+            break;
+        case 'smtps:':
+            options.secure = true;
+            break;
+        case 'direct:':
+            options.direct = true;
+            break;
+    }
 
-        switch (url.protocol) {
-            case 'smtp:':
-                options.secure = false;
+    if (!isNaN(url.port) && Number(url.port)) {
+        options.port = Number(url.port);
+    }
+
+    if (url.hostname) {
+        options.host = url.hostname;
+    }
+
+    if (url.auth) {
+        const auth = url.auth.split(':');
+        options.auth = {
+            user: auth.shift(),
+            pass: auth.join(':')
+        };
+    }
+
+    Object.keys(url.query || {}).forEach(key => {
+        let obj = options;
+        let lKey = key;
+        let value = url.query[key];
+
+        if (!isNaN(value)) {
+            value = Number(value);
+        }
+
+        switch (value) {
+            case 'true':
+                value = true;
                 break;
-            case 'smtps:':
-                options.secure = true;
-                break;
-            case 'direct:':
-                options.direct = true;
+            case 'false':
+                value = false;
                 break;
         }
 
-        if (!isNaN(url.port) && Number(url.port)) {
-            options.port = Number(url.port);
+        // tls is nested object
+        if (key.indexOf('tls.') === 0) {
+            lKey = key.substr(4);
+            if (!options.tls) {
+                options.tls = {};
+            }
+            obj = options.tls;
+        } else if (key.indexOf('.') >= 0) {
+            // ignore nested properties besides tls
+            return;
         }
 
-        if (url.hostname) {
-            options.host = url.hostname;
+        if (!(lKey in obj)) {
+            obj[lKey] = value;
         }
-
-        if (url.auth) {
-            auth = url.auth.split(':');
-
-            if (!options.auth) {
-                options.auth = {};
-            }
-
-            options.auth.user = auth.shift();
-            options.auth.pass = auth.join(':');
-        }
-
-        Object.keys(url.query || {}).forEach(key => {
-            let obj = options;
-            let lKey = key;
-            let value = url.query[key];
-
-            if (!isNaN(value)) {
-                value = Number(value);
-            }
-
-            switch (value) {
-                case 'true':
-                    value = true;
-                    break;
-                case 'false':
-                    value = false;
-                    break;
-            }
-
-            // tls is nested object
-            if (key.indexOf('tls.') === 0) {
-                lKey = key.substr(4);
-                if (!options.tls) {
-                    options.tls = {};
-                }
-                obj = options.tls;
-            } else if (key.indexOf('.') >= 0) {
-                // ignore nested properties besides tls
-                return;
-            }
-
-            if (!(lKey in obj)) {
-                obj[lKey] = value;
-            }
-        });
     });
 
     return options;
 };
 
 module.exports._logFunc = (logger, level, defaults, data, message, ...args) => {
-    let entry = {};
+    const entry = Object.assign({}, defaults || {}, data || {});
+    delete entry.level;
 
-    Object.keys(defaults || {}).forEach(key => {
-        if (key !== 'level') {
-            entry[key] = defaults[key];
-        }
-    });
+    let logLevel = level;
+    if (typeof logger[logLevel] !== 'function') {
+        // Provided logger does not implement this level. Fall back to a
+        // lower-severity handler instead of throwing.
+        logLevel = ['info', 'debug', 'log', 'trace', 'warn', 'error'].find(name => typeof logger[name] === 'function');
+    }
 
-    Object.keys(data || {}).forEach(key => {
-        if (key !== 'level') {
-            entry[key] = data[key];
-        }
-    });
-
-    logger[level](entry, message, ...args);
+    if (logLevel) {
+        logger[logLevel](entry, message, ...args);
+    }
 };
 
 /**
@@ -9364,8 +9275,8 @@ module.exports._logFunc = (logger, level, defaults, data, message, ...args) => {
 module.exports.getLogger = (options, defaults) => {
     options = options || {};
 
-    let response = {};
-    let levels = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'];
+    const response = {};
+    const levels = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'];
 
     if (!options.logger) {
         // use vanity logger
@@ -9375,12 +9286,7 @@ module.exports.getLogger = (options, defaults) => {
         return response;
     }
 
-    let logger = options.logger;
-
-    if (options.logger === true) {
-        // create console logger
-        logger = createDefaultLogger(levels);
-    }
+    const logger = options.logger === true ? createDefaultLogger(levels) : options.logger;
 
     levels.forEach(level => {
         response[level] = (data, message, ...args) => {
@@ -9400,8 +9306,8 @@ module.exports.getLogger = (options, defaults) => {
  */
 module.exports.callbackPromise = (resolve, reject) =>
     function () {
-        let args = Array.from(arguments);
-        let err = args.shift();
+        const args = Array.from(arguments);
+        const err = args.shift();
         if (err) {
             reject(err);
         } else {
@@ -9491,9 +9397,17 @@ module.exports.parseDataURI = uri => {
  *
  * @param {Object} data An object or an Array you want to resolve an element for
  * @param {String|Number} key Property name or an Array index
+ * @param {Object} [options] Optional access policy: { disableFileAccess, disableUrlAccess }
  * @param {Function} callback Callback function with (err, value)
  */
-module.exports.resolveContent = (data, key, callback) => {
+module.exports.resolveContent = (data, key, options, callback) => {
+    // options is optional; support the legacy resolveContent(data, key, callback) signature
+    if (!callback && typeof options === 'function') {
+        callback = options;
+        options = false;
+    }
+    options = options || {};
+
     let promise;
 
     if (!callback) {
@@ -9503,8 +9417,7 @@ module.exports.resolveContent = (data, key, callback) => {
     }
 
     let content = (data && data[key] && data[key].content) || data[key];
-    let contentStream;
-    let encoding = ((typeof data[key] === 'object' && data[key].encoding) || 'utf8')
+    const encoding = ((typeof data[key] === 'object' && data[key].encoding) || 'utf8')
         .toString()
         .toLowerCase()
         .replace(/[-_\s]/g, '');
@@ -9529,16 +9442,29 @@ module.exports.resolveContent = (data, key, callback) => {
                 callback(null, value);
             });
         } else if (/^https?:\/\//i.test(content.path || content.href)) {
-            contentStream = nmfetch(content.path || content.href);
-            return resolveStream(contentStream, callback);
+            if (options.disableUrlAccess) {
+                return setImmediate(() => {
+                    const err = new Error('Url access rejected for ' + (content.path || content.href));
+                    err.code = errors.EURLACCESS;
+                    callback(err);
+                });
+            }
+            return resolveStream(nmfetch(content.path || content.href), callback);
         } else if (/^data:/i.test(content.path || content.href)) {
-            let parsedDataUri = module.exports.parseDataURI(content.path || content.href);
+            const parsedDataUri = module.exports.parseDataURI(content.path || content.href);
 
             if (!parsedDataUri || !parsedDataUri.data) {
                 return callback(null, Buffer.from(0));
             }
             return callback(null, parsedDataUri.data);
         } else if (content.path) {
+            if (options.disableFileAccess) {
+                return setImmediate(() => {
+                    const err = new Error('File access rejected for ' + content.path);
+                    err.code = errors.EFILEACCESS;
+                    callback(err);
+                });
+            }
             return resolveStream(fs.createReadStream(content.path), callback);
         }
     }
@@ -9557,21 +9483,15 @@ module.exports.resolveContent = (data, key, callback) => {
  * Copies properties from source objects to target objects
  */
 module.exports.assign = function (/* target, ... sources */) {
-    let args = Array.from(arguments);
-    let target = args.shift() || {};
+    const args = Array.from(arguments);
+    const target = args.shift() || {};
 
     args.forEach(source => {
         Object.keys(source || {}).forEach(key => {
             if (['tls', 'auth'].includes(key) && source[key] && typeof source[key] === 'object') {
                 // tls and auth are special keys that need to be enumerated separately
                 // other objects are passed as is
-                if (!target[key]) {
-                    // ensure that target has this key
-                    target[key] = {};
-                }
-                Object.keys(source[key]).forEach(subKey => {
-                    target[key][subKey] = source[key][subKey];
-                });
+                target[key] = Object.assign(target[key] || {}, source[key]);
             } else {
                 target[key] = source[key];
             }
@@ -9588,10 +9508,10 @@ module.exports.encodeXText = str => {
     if (!/[^\x21-\x2A\x2C-\x3C\x3E-\x7E]/.test(str)) {
         return str;
     }
-    let buf = Buffer.from(str);
+    const buf = Buffer.from(str);
     let result = '';
     for (let i = 0, len = buf.length; i < len; i++) {
-        let c = buf[i];
+        const c = buf[i];
         if (c < 0x21 || c > 0x7e || c === 0x2b || c === 0x3d) {
             result += '+' + (c < 0x10 ? '0' : '') + c.toString(16).toUpperCase();
         } else {
@@ -9609,7 +9529,7 @@ module.exports.encodeXText = str => {
  */
 function resolveStream(stream, callback) {
     let responded = false;
-    let chunks = [];
+    const chunks = [];
     let chunklen = 0;
 
     stream.on('error', err => {
@@ -9652,13 +9572,8 @@ function resolveStream(stream, callback) {
  * @returns {Object} Bunyan logger instance
  */
 function createDefaultLogger(levels) {
-    let levelMaxLen = 0;
-    let levelNames = new Map();
-    levels.forEach(level => {
-        if (level.length > levelMaxLen) {
-            levelMaxLen = level.length;
-        }
-    });
+    const levelMaxLen = levels.reduce((max, level) => Math.max(max, level.length), 0);
+    const levelNames = new Map();
 
     levels.forEach(level => {
         let levelName = level.toUpperCase();
@@ -9668,7 +9583,7 @@ function createDefaultLogger(levels) {
         levelNames.set(level, levelName);
     });
 
-    let print = (level, entry, message, ...args) => {
+    const print = (level, entry, message, ...args) => {
         let prefix = '';
         if (entry) {
             if (entry.tnx === 'server') {
@@ -9692,7 +9607,7 @@ function createDefaultLogger(levels) {
         });
     };
 
-    let logger = {};
+    const logger = {};
     levels.forEach(level => {
         logger[level] = print.bind(null, level);
     });
@@ -9708,8 +9623,7 @@ function createDefaultLogger(levels) {
 
 
 
-const stream = __nccwpck_require__(2203);
-const Transform = stream.Transform;
+const { Transform } = __nccwpck_require__(2203);
 
 /**
  * Escapes dots in the beginning of lines. Ends the stream with <CR><LF>.<CR><LF>
@@ -9720,9 +9634,7 @@ const Transform = stream.Transform;
 class DataStream extends Transform {
     constructor(options) {
         super(options);
-        // init Transform
         this.options = options || {};
-        this._curLine = '';
 
         this.inByteCount = 0;
         this.outByteCount = 0;
@@ -9733,7 +9645,7 @@ class DataStream extends Transform {
      * Escapes dots
      */
     _transform(chunk, encoding, done) {
-        let chunks = [];
+        const chunks = [];
         let chunklen = 0;
         let i,
             len,
@@ -9761,7 +9673,7 @@ class DataStream extends Transform {
                     lastPos = i + 1;
                 }
             } else if (chunk[i] === 0x0a) {
-                // .
+                // \n
                 if ((i && chunk[i - 1] !== 0x0d) || (!i && this.lastByte !== 0x0d)) {
                     if (i > lastPos) {
                         buf = chunk.slice(lastPos, i);
@@ -9845,18 +9757,14 @@ const errors = __nccwpck_require__(7633);
  * @param {Function} callback Callback to run with the rocket object once connection is established
  */
 function httpProxyClient(proxyUrl, destinationPort, destinationHost, callback) {
-    let proxy = urllib.parse(proxyUrl);
+    const proxy = urllib.parse(proxyUrl);
 
-    // create a socket connection to the proxy server
-    let options;
-    let connect;
-    let socket;
-
-    options = {
+    const options = {
         host: proxy.hostname,
         port: Number(proxy.port) ? Number(proxy.port) : proxy.protocol === 'https:' ? 443 : 80
     };
 
+    let connect;
     if (proxy.protocol === 'https:') {
         // we can use untrusted proxies as long as we verify actual SMTP certificates
         options.rejectUnauthorized = false;
@@ -9865,10 +9773,12 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, callback) {
         connect = net.connect.bind(net);
     }
 
+    let socket;
+
     // Error harness for initial connection. Once connection is established, the responsibility
     // to handle errors is passed to whoever uses this socket
     let finished = false;
-    let tempSocketErr = err => {
+    const tempSocketErr = err => {
         if (finished) {
             return;
         }
@@ -9881,8 +9791,8 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, callback) {
         callback(err);
     };
 
-    let timeoutErr = () => {
-        let err = new Error('Proxy socket timed out');
+    const timeoutErr = () => {
+        const err = new Error('Proxy socket timed out');
         err.code = 'ETIMEDOUT';
         tempSocketErr(err);
     };
@@ -9892,7 +9802,7 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, callback) {
             return;
         }
 
-        let reqHeaders = {
+        const reqHeaders = {
             Host: destinationHost + ':' + destinationPort,
             Connection: 'close'
         };
@@ -9916,7 +9826,7 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, callback) {
         );
 
         let headers = '';
-        let onSocketData = chunk => {
+        const onSocketData = chunk => {
             let match;
             let remainder;
 
@@ -9945,7 +9855,7 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, callback) {
                     } catch (_E) {
                         // ignore
                     }
-                    let err = new Error('Invalid response from proxy' + ((match && ': ' + match[1]) || ''));
+                    const err = new Error('Invalid response from proxy' + ((match && ': ' + match[1]) || ''));
                     err.code = errors.EPROXY;
                     return callback(err);
                 }
@@ -9977,13 +9887,13 @@ module.exports = httpProxyClient;
 
 
 const packageInfo = __nccwpck_require__(6710);
-const EventEmitter = (__nccwpck_require__(4434).EventEmitter);
+const { EventEmitter } = __nccwpck_require__(4434);
 const net = __nccwpck_require__(9278);
 const tls = __nccwpck_require__(4756);
 const os = __nccwpck_require__(857);
 const crypto = __nccwpck_require__(6982);
 const DataStream = __nccwpck_require__(627);
-const PassThrough = (__nccwpck_require__(2203).PassThrough);
+const { PassThrough } = __nccwpck_require__(2203);
 const shared = __nccwpck_require__(1284);
 
 // default timeout values in ms
@@ -9992,6 +9902,28 @@ const SOCKET_TIMEOUT = 10 * 60 * 1000; // how much to wait for socket inactivity
 const GREETING_TIMEOUT = 30 * 1000; // how much to wait after connection is established but SMTP greeting is not receieved
 const DNS_TIMEOUT = 30 * 1000; // how much to wait for resolveHostname
 const TEARDOWN_NOOP = () => {}; // reusable no-op handler for absorbing errors during socket teardown
+
+/**
+ * Re-interpret a server response stored in fake 8-bit byte-container form
+ * (the result of chunk.toString('binary') in _onData) as UTF-8.
+ *
+ * Server reply text has no formally defined charset (RFC 5321 §4.2.1), but
+ * modern MTAs commonly use UTF-8. The byte-container plumbing in _onData is
+ * required to reassemble multi-byte sequences split across socket chunks;
+ * this helper performs the actual decode at the line boundary, falling back
+ * to the byte-container form when the bytes are not valid UTF-8 so that
+ * legacy 8-bit replies are still recoverable byte-for-byte.
+ */
+function decodeServerResponse(str) {
+    if (!str) {
+        return str;
+    }
+    const utf8 = Buffer.from(str, 'binary').toString('utf8');
+    // The input is a byte container (each char is in U+0000..U+00FF) so it can never
+    // already contain U+FFFD; any \uFFFD in the result was inserted by Node's UTF-8
+    // decoder for invalid bytes, which means we should return the original bytes intact.
+    return utf8.includes('\uFFFD') ? str : utf8;
+}
 
 /**
  * Generates a SMTP connection object
@@ -10044,7 +9976,7 @@ class SMTPConnection extends EventEmitter {
             this.secureConnection = true;
         }
 
-        this.name = this.options.name || this._getHostname();
+        this.name = (this.options.name || this._getHostname()).toString().replace(/[\r\n]+/g, '');
 
         this.logger = shared.getLogger(this.options, {
             component: this.options.component || 'smtp-connection',
@@ -10052,13 +9984,12 @@ class SMTPConnection extends EventEmitter {
         });
 
         this.customAuth = new Map();
-        Object.keys(this.options.customAuth || {}).forEach(key => {
-            let mapKey = (key || '').toString().trim().toUpperCase();
-            if (!mapKey) {
-                return;
+        for (const key of Object.keys(this.options.customAuth || {})) {
+            const mapKey = (key || '').toString().trim().toUpperCase();
+            if (mapKey) {
+                this.customAuth.set(mapKey, this.options.customAuth[key]);
             }
-            this.customAuth.set(mapKey, this.options.customAuth[key]);
-        });
+        }
 
         /**
          * Expose version nr, just for the reference
@@ -10167,6 +10098,13 @@ class SMTPConnection extends EventEmitter {
         this._closing = false;
 
         /**
+         * Message DATA stream currently piped to the socket, if any. Tracked so
+         * close() can unpipe it before tearing the socket down.
+         * @private
+         */
+        this._currentDataStream = false;
+
+        /**
          * Callbacks for socket's listeners
          */
         this._onSocketData = chunk => this._onData(chunk);
@@ -10242,27 +10180,7 @@ class SMTPConnection extends EventEmitter {
         } else if (this.options.socket) {
             // socket object is set up but not yet connected
             this._socket = this.options.socket;
-            return shared.resolveHostname(opts, (err, resolved) => {
-                if (err) {
-                    return setImmediate(() => this._onError(err, 'EDNS', false, 'CONN'));
-                }
-                this.logger.debug(
-                    {
-                        tnx: 'dns',
-                        source: opts.host,
-                        resolved: resolved.host,
-                        cached: !!resolved.cached
-                    },
-                    'Resolved %s as %s [cache %s]',
-                    opts.host,
-                    resolved.host,
-                    resolved.cached ? 'hit' : 'miss'
-                );
-                Object.keys(resolved).forEach(key => {
-                    if (key.charAt(0) !== '_' && resolved[key]) {
-                        opts[key] = resolved[key];
-                    }
-                });
+            return this._resolveAndConnect(opts, _resolved => {
                 try {
                     this._socket.connect(this.port, this.host, () => {
                         this._socket.setKeepAlive(true);
@@ -10273,78 +10191,57 @@ class SMTPConnection extends EventEmitter {
                     return setImmediate(() => this._onError(E, 'ECONNECTION', false, 'CONN'));
                 }
             });
-        } else if (this.secureConnection) {
-            // connect using tls
-            if (this.options.tls) {
-                Object.keys(this.options.tls).forEach(key => {
-                    opts[key] = this.options.tls[key];
-                });
-            }
-
-            // ensure servername for SNI
-            if (this.servername && !opts.servername) {
-                opts.servername = this.servername;
-            }
-
-            return shared.resolveHostname(opts, (err, resolved) => {
-                if (err) {
-                    return setImmediate(() => this._onError(err, 'EDNS', false, 'CONN'));
-                }
-                this.logger.debug(
-                    {
-                        tnx: 'dns',
-                        source: opts.host,
-                        resolved: resolved.host,
-                        cached: !!resolved.cached
-                    },
-                    'Resolved %s as %s [cache %s]',
-                    opts.host,
-                    resolved.host,
-                    resolved.cached ? 'hit' : 'miss'
-                );
-                Object.keys(resolved).forEach(key => {
-                    if (key.charAt(0) !== '_' && resolved[key]) {
-                        opts[key] = resolved[key];
-                    }
-                });
-
-                // Store fallback addresses for retry on connection failure
-                this._fallbackAddresses = (resolved._addresses || []).filter(addr => addr !== opts.host);
-                this._connectOpts = Object.assign({}, opts);
-
-                this._connectToHost(opts, true);
-            });
         } else {
-            // connect using plaintext
-            return shared.resolveHostname(opts, (err, resolved) => {
-                if (err) {
-                    return setImmediate(() => this._onError(err, 'EDNS', false, 'CONN'));
-                }
-                this.logger.debug(
-                    {
-                        tnx: 'dns',
-                        source: opts.host,
-                        resolved: resolved.host,
-                        cached: !!resolved.cached
-                    },
-                    'Resolved %s as %s [cache %s]',
-                    opts.host,
-                    resolved.host,
-                    resolved.cached ? 'hit' : 'miss'
-                );
-                Object.keys(resolved).forEach(key => {
-                    if (key.charAt(0) !== '_' && resolved[key]) {
-                        opts[key] = resolved[key];
-                    }
-                });
+            if (this.secureConnection) {
+                Object.assign(opts, this.options.tls || {});
 
+                // ensure servername for SNI
+                if (this.servername && !opts.servername) {
+                    opts.servername = this.servername;
+                }
+            }
+
+            return this._resolveAndConnect(opts, resolved => {
                 // Store fallback addresses for retry on connection failure
                 this._fallbackAddresses = (resolved._addresses || []).filter(addr => addr !== opts.host);
                 this._connectOpts = Object.assign({}, opts);
 
-                this._connectToHost(opts, false);
+                this._connectToHost(opts, this.secureConnection);
             });
         }
+    }
+
+    /**
+     * Resolves the hostname and applies resolved values to opts,
+     * then calls the provided callback with the resolved data
+     *
+     * @param {Object} opts Connection options (modified in place)
+     * @param {Function} callback Called with resolved data on success
+     */
+    _resolveAndConnect(opts, callback) {
+        return shared.resolveHostname(opts, (err, resolved) => {
+            if (err) {
+                return setImmediate(() => this._onError(err, 'EDNS', false, 'CONN'));
+            }
+            this.logger.debug(
+                {
+                    tnx: 'dns',
+                    source: opts.host,
+                    resolved: resolved.host,
+                    cached: !!resolved.cached
+                },
+                'Resolved %s as %s [cache %s]',
+                opts.host,
+                resolved.host,
+                resolved.cached ? 'hit' : 'miss'
+            );
+            for (const key of Object.keys(resolved)) {
+                if (key.charAt(0) !== '_' && resolved[key]) {
+                    opts[key] = resolved[key];
+                }
+            }
+            callback(resolved);
+        });
     }
 
     /**
@@ -10357,7 +10254,7 @@ class SMTPConnection extends EventEmitter {
         this._connectionAttemptId++;
         const currentAttemptId = this._connectionAttemptId;
 
-        let connectFn = secure ? tls.connect : net.connect;
+        const connectFn = secure ? tls.connect : net.connect;
         try {
             this._socket = connectFn(opts, () => {
                 // Ignore callback if this is a stale connection attempt
@@ -10394,7 +10291,7 @@ class SMTPConnection extends EventEmitter {
         clearTimeout(this._connectionTimeout);
 
         // Check if we have fallback addresses to try
-        let canFallback = this._fallbackAddresses && this._fallbackAddresses.length && this.stage === 'init' && !this._destroyed;
+        const canFallback = this._fallbackAddresses && this._fallbackAddresses.length && this.stage === 'init' && !this._destroyed;
 
         if (!canFallback) {
             // No more fallback addresses, report the error
@@ -10402,7 +10299,7 @@ class SMTPConnection extends EventEmitter {
             return;
         }
 
-        let nextHost = this._fallbackAddresses.shift();
+        const nextHost = this._fallbackAddresses.shift();
 
         this.logger.info(
             {
@@ -10454,12 +10351,7 @@ class SMTPConnection extends EventEmitter {
         }
         this._closing = true;
 
-        let closeMethod = 'end';
-
-        if (this.stage === 'init') {
-            // Close the socket immediately when connection timed out
-            closeMethod = 'destroy';
-        }
+        const closeMethod = this.stage === 'init' ? 'destroy' : 'end';
 
         this.logger.debug(
             {
@@ -10469,7 +10361,18 @@ class SMTPConnection extends EventEmitter {
             closeMethod
         );
 
-        let socket = (this._socket && this._socket.socket) || this._socket;
+        const socket = (this._socket && this._socket.socket) || this._socket;
+
+        // Detach any in-flight DATA stream from the socket so the source stream
+        // can be garbage-collected once the socket is gone.
+        if (this._currentDataStream) {
+            try {
+                this._currentDataStream.unpipe(this._socket);
+            } catch (_E) {
+                // ignore
+            }
+            this._currentDataStream = false;
+        }
 
         if (socket && !socket.destroyed) {
             try {
@@ -10527,11 +10430,11 @@ class SMTPConnection extends EventEmitter {
         }
 
         if (this.customAuth.has(this._authMethod)) {
-            let handler = this.customAuth.get(this._authMethod);
+            const handler = this.customAuth.get(this._authMethod);
             let lastResponse;
             let returned = false;
 
-            let resolve = () => {
+            const resolve = () => {
                 if (returned) {
                     return;
                 }
@@ -10550,7 +10453,7 @@ class SMTPConnection extends EventEmitter {
                 callback(null, true);
             };
 
-            let reject = err => {
+            const reject = err => {
                 if (returned) {
                     return;
                 }
@@ -10558,7 +10461,7 @@ class SMTPConnection extends EventEmitter {
                 callback(this._formatError(err, 'EAUTH', lastResponse, 'AUTH ' + this._authMethod));
             };
 
-            let handlerResponse = handler({
+            const handlerResponse = handler({
                 auth: this._auth,
                 method: this._authMethod,
 
@@ -10685,7 +10588,7 @@ class SMTPConnection extends EventEmitter {
 
         // ensure that callback is only called once
         let returned = false;
-        let callback = function () {
+        const callback = function () {
             if (returned) {
                 return;
             }
@@ -10698,11 +10601,11 @@ class SMTPConnection extends EventEmitter {
             message.on('error', err => callback(this._formatError(err, 'ESTREAM', false, 'API')));
         }
 
-        let startTime = Date.now();
+        const startTime = Date.now();
         this._setEnvelope(envelope, (err, info) => {
             if (err) {
                 // create passthrough stream to consume to prevent OOM
-                let stream = new PassThrough();
+                const stream = new PassThrough();
                 if (typeof message.pipe === 'function') {
                     message.pipe(stream);
                 } else {
@@ -10712,8 +10615,8 @@ class SMTPConnection extends EventEmitter {
 
                 return callback(err);
             }
-            let envelopeTime = Date.now();
-            let stream = this._createSendStream((err, str) => {
+            const envelopeTime = Date.now();
+            const stream = this._createSendStream((err, str) => {
                 if (err) {
                     return callback(err);
                 }
@@ -10897,7 +10800,7 @@ class SMTPConnection extends EventEmitter {
             err.message += ': ' + response;
         }
 
-        let responseCode = (typeof response === 'string' && Number((response.match(/^\d+/) || [])[0])) || false;
+        const responseCode = (typeof response === 'string' && Number((response.match(/^\d+/) || [])[0])) || false;
         if (responseCode) {
             err.responseCode = responseCode;
         }
@@ -10918,15 +10821,15 @@ class SMTPConnection extends EventEmitter {
         let serverResponse = false;
 
         if (this._remainder && this._remainder.trim()) {
+            this.lastServerResponse = serverResponse = decodeServerResponse(this._remainder.trim());
             if (this.options.debug || this.options.transactionLog) {
                 this.logger.debug(
                     {
                         tnx: 'server'
                     },
-                    this._remainder.replace(/\r?\n$/, '')
+                    serverResponse
                 );
             }
-            this.lastServerResponse = serverResponse = this._remainder.trim();
         }
 
         this.logger.info(
@@ -10954,7 +10857,9 @@ class SMTPConnection extends EventEmitter {
      */
     _onEnd() {
         if (this._socket && !this._socket.destroyed) {
-            this._socket.destroy();
+            // Peer sent FIN — finish our half of the close gracefully rather
+            // than destroying. 'close' fires after the OS finalizes teardown.
+            this._socket.end();
         }
     }
 
@@ -10992,20 +10897,28 @@ class SMTPConnection extends EventEmitter {
         this._socket.removeListener('data', this._onSocketData); // incoming data is going to be gibberish from this point onwards
         this._socket.removeListener('timeout', this._onSocketTimeout); // timeout will be re-set for the new socket object
 
-        let socketPlain = this._socket;
-        let opts = {
-            socket: this._socket,
-            host: this.host
-        };
-
-        Object.keys(this.options.tls || {}).forEach(key => {
-            opts[key] = this.options.tls[key];
-        });
+        const socketPlain = this._socket;
+        const opts = Object.assign(
+            {
+                socket: this._socket,
+                host: this.host
+            },
+            this.options.tls || {}
+        );
 
         // ensure servername for SNI
         if (this.servername && !opts.servername) {
             opts.servername = this.servername;
         }
+
+        // Remove all listeners from the plain socket to allow proper garbage
+        // collection. Used on both the TLS-success path and the synchronous
+        // tls.connect() throw path; either way the plain socket is done.
+        const removePlainSocketListeners = () => {
+            socketPlain.removeListener('close', this._onSocketClose);
+            socketPlain.removeListener('end', this._onSocketEnd);
+            socketPlain.removeListener('error', this._onSocketError);
+        };
 
         this.upgrading = true;
         // tls.connect is not an asynchronous function however it may still throw errors and requires to be wrapped with try/catch
@@ -11015,14 +10928,12 @@ class SMTPConnection extends EventEmitter {
                 this.upgrading = false;
                 this._socket.on('data', this._onSocketData);
 
-                // Remove all listeners from the plain socket to allow proper garbage collection
-                socketPlain.removeListener('close', this._onSocketClose);
-                socketPlain.removeListener('end', this._onSocketEnd);
-                socketPlain.removeListener('error', this._onSocketError);
+                removePlainSocketListeners();
 
                 return callback(null, true);
             });
         } catch (err) {
+            removePlainSocketListeners();
             return callback(err);
         }
 
@@ -11047,7 +10958,7 @@ class SMTPConnection extends EventEmitter {
             return false;
         }
 
-        let str = (this.lastServerResponse = (this._responseQueue.shift() || '').toString());
+        let str = (this.lastServerResponse = decodeServerResponse((this._responseQueue.shift() || '').toString()));
 
         if (/^\d+-/.test(str.split('\n').pop())) {
             // keep waiting for the final part of multiline response
@@ -11068,7 +10979,7 @@ class SMTPConnection extends EventEmitter {
             setImmediate(() => this._processResponse());
         }
 
-        let action = this._responseActions.shift();
+        const action = this._responseActions.shift();
 
         if (typeof action === 'function') {
             action.call(this, str);
@@ -11116,7 +11027,7 @@ class SMTPConnection extends EventEmitter {
      *        {from:{address:'...',name:'...'}, to:[address:'...',name:'...']}
      */
     _setEnvelope(envelope, callback) {
-        let args = [];
+        const args = [];
         let useSmtpUtf8 = false;
 
         this._envelope = envelope || {};
@@ -11151,7 +11062,7 @@ class SMTPConnection extends EventEmitter {
         }
 
         // clone the recipients array for latter manipulation
-        this._envelope.rcptQueue = JSON.parse(JSON.stringify(this._envelope.to || []));
+        this._envelope.rcptQueue = [].concat(this._envelope.to || []);
         this._envelope.rejected = [];
         this._envelope.rejectedErrors = [];
         this._envelope.accepted = [];
@@ -11183,7 +11094,10 @@ class SMTPConnection extends EventEmitter {
         }
 
         if (this._envelope.size && this._supportedExtensions.includes('SIZE')) {
-            args.push('SIZE=' + this._envelope.size);
+            const sizeValue = Number(this._envelope.size) || 0;
+            if (sizeValue > 0) {
+                args.push('SIZE=' + sizeValue);
+            }
         }
 
         // If the server supports DSN and the envelope includes an DSN prop
@@ -11236,7 +11150,7 @@ class SMTPConnection extends EventEmitter {
             throw new Error('ret: ' + JSON.stringify(ret));
         }
 
-        let envid = (params.envid || params.id || '').toString() || null;
+        const envid = (params.envid || params.id || '').toString() || null;
 
         let notify = params.notify || null;
         if (notify) {
@@ -11244,8 +11158,8 @@ class SMTPConnection extends EventEmitter {
                 notify = notify.split(',');
             }
             notify = notify.map(n => n.trim().toUpperCase());
-            let validNotify = ['NEVER', 'SUCCESS', 'FAILURE', 'DELAY'];
-            let invalidNotify = notify.filter(n => !validNotify.includes(n));
+            const validNotify = ['NEVER', 'SUCCESS', 'FAILURE', 'DELAY'];
+            const invalidNotify = notify.filter(n => !validNotify.includes(n));
             if (invalidNotify.length || (notify.length > 1 && notify.includes('NEVER'))) {
                 throw new Error('notify: ' + JSON.stringify(notify.join(',')));
             }
@@ -11266,7 +11180,7 @@ class SMTPConnection extends EventEmitter {
     }
 
     _getDsnRcptToArgs() {
-        let args = [];
+        const args = [];
         // If the server supports DSN and the envelope includes an DSN prop
         // then append DSN params to the RCPT TO command
         if (this._envelope.dsn && this._supportedExtensions.includes('DSN')) {
@@ -11281,12 +11195,11 @@ class SMTPConnection extends EventEmitter {
     }
 
     _createSendStream(callback) {
-        let dataStream = new DataStream();
-        let logStream;
+        const dataStream = new DataStream();
 
         if (this.options.lmtp) {
             this._envelope.accepted.forEach((recipient, i) => {
-                let final = i === this._envelope.accepted.length - 1;
+                const final = i === this._envelope.accepted.length - 1;
                 this._responseActions.push(str => {
                     this._actionLMTPStream(recipient, final, str, callback);
                 });
@@ -11297,12 +11210,13 @@ class SMTPConnection extends EventEmitter {
             });
         }
 
+        this._currentDataStream = dataStream;
         dataStream.pipe(this._socket, {
             end: false
         });
 
         if (this.options.debug) {
-            logStream = new PassThrough();
+            const logStream = new PassThrough();
             logStream.on('readable', () => {
                 let chunk;
                 while ((chunk = logStream.read())) {
@@ -11318,6 +11232,9 @@ class SMTPConnection extends EventEmitter {
         }
 
         dataStream.once('end', () => {
+            if (this._currentDataStream === dataStream) {
+                this._currentDataStream = false;
+            }
             this.logger.info(
                 {
                     tnx: 'message',
@@ -11580,24 +11497,21 @@ class SMTPConnection extends EventEmitter {
      * @param {String} str Message from the server
      */
     _actionAUTH_CRAM_MD5(str, callback) {
-        let challengeMatch = str.match(/^334\s+(.+)$/);
-        let challengeString = '';
+        const challengeMatch = str.match(/^334\s+(.+)$/);
 
         if (!challengeMatch) {
             return callback(
                 this._formatError('Invalid login sequence while waiting for server challenge string', 'EAUTH', str, 'AUTH CRAM-MD5')
             );
-        } else {
-            challengeString = challengeMatch[1];
         }
 
         // Decode from base64
-        let base64decoded = Buffer.from(challengeString, 'base64').toString('ascii'),
-            hmacMD5 = crypto.createHmac('md5', this._auth.credentials.pass);
+        const base64decoded = Buffer.from(challengeMatch[1], 'base64').toString('ascii');
+        const hmacMD5 = crypto.createHmac('md5', this._auth.credentials.pass);
 
         hmacMD5.update(base64decoded);
 
-        let prepended = this._auth.credentials.user + ' ' + hmacMD5.digest('hex');
+        const prepended = this._auth.credentials.user + ' ' + hmacMD5.digest('hex');
 
         this._responseActions.push(str => {
             this._actionAUTH_CRAM_MD5_PASS(str, callback);
@@ -11718,39 +11632,29 @@ class SMTPConnection extends EventEmitter {
      * @param {String} str Message from the server
      */
     _actionMAIL(str, callback) {
-        let message, curRecipient;
         if (Number(str.charAt(0)) !== 2) {
-            if (this._usingSmtpUtf8 && /^550 /.test(str) && /[\x80-\uFFFF]/.test(this._envelope.from)) {
-                message = 'Internationalized mailbox name not allowed';
-            } else {
-                message = 'Mail command failed';
-            }
+            const message =
+                this._usingSmtpUtf8 && /^550 /.test(str) && /[\x80-\uFFFF]/.test(this._envelope.from)
+                    ? 'Internationalized mailbox name not allowed'
+                    : 'Mail command failed';
             return callback(this._formatError(message, 'EENVELOPE', str, 'MAIL FROM'));
         }
 
         if (!this._envelope.rcptQueue.length) {
             return callback(this._formatError("Can't send mail - no recipients defined", 'EENVELOPE', false, 'API'));
-        } else {
-            this._recipientQueue = [];
-
-            if (this._supportedExtensions.includes('PIPELINING')) {
-                while (this._envelope.rcptQueue.length) {
-                    curRecipient = this._envelope.rcptQueue.shift();
-                    this._recipientQueue.push(curRecipient);
-                    this._responseActions.push(str => {
-                        this._actionRCPT(str, callback);
-                    });
-                    this._sendCommand('RCPT TO:<' + curRecipient + '>' + this._getDsnRcptToArgs());
-                }
-            } else {
-                curRecipient = this._envelope.rcptQueue.shift();
-                this._recipientQueue.push(curRecipient);
-                this._responseActions.push(str => {
-                    this._actionRCPT(str, callback);
-                });
-                this._sendCommand('RCPT TO:<' + curRecipient + '>' + this._getDsnRcptToArgs());
-            }
         }
+
+        this._recipientQueue = [];
+        const usePipelining = this._supportedExtensions.includes('PIPELINING');
+
+        do {
+            const curRecipient = this._envelope.rcptQueue.shift();
+            this._recipientQueue.push(curRecipient);
+            this._responseActions.push(str => {
+                this._actionRCPT(str, callback);
+            });
+            this._sendCommand('RCPT TO:<' + curRecipient + '>' + this._getDsnRcptToArgs());
+        } while (usePipelining && this._envelope.rcptQueue.length);
     }
 
     /**
@@ -11759,16 +11663,14 @@ class SMTPConnection extends EventEmitter {
      * @param {String} str Message from the server
      */
     _actionRCPT(str, callback) {
-        let message,
-            err,
-            curRecipient = this._recipientQueue.shift();
+        let err;
+        const curRecipient = this._recipientQueue.shift();
         if (Number(str.charAt(0)) !== 2) {
             // this is a soft error
-            if (this._usingSmtpUtf8 && /^553 /.test(str) && /[\x80-\uFFFF]/.test(curRecipient)) {
-                message = 'Internationalized mailbox name not allowed';
-            } else {
-                message = 'Recipient command failed';
-            }
+            const message =
+                this._usingSmtpUtf8 && /^553 /.test(str) && /[\x80-\uFFFF]/.test(curRecipient)
+                    ? 'Internationalized mailbox name not allowed'
+                    : 'Recipient command failed';
             this._envelope.rejected.push(curRecipient);
             // store error for the failed recipient
             err = this._formatError(message, 'EENVELOPE', str, 'RCPT TO');
@@ -11791,12 +11693,12 @@ class SMTPConnection extends EventEmitter {
                 return callback(err);
             }
         } else if (this._envelope.rcptQueue.length) {
-            curRecipient = this._envelope.rcptQueue.shift();
-            this._recipientQueue.push(curRecipient);
+            const nextRecipient = this._envelope.rcptQueue.shift();
+            this._recipientQueue.push(nextRecipient);
             this._responseActions.push(str => {
                 this._actionRCPT(str, callback);
             });
-            this._sendCommand('RCPT TO:<' + curRecipient + '>' + this._getDsnRcptToArgs());
+            this._sendCommand('RCPT TO:<' + nextRecipient + '>' + this._getDsnRcptToArgs());
         }
     }
 
@@ -11812,7 +11714,7 @@ class SMTPConnection extends EventEmitter {
             return callback(this._formatError('Data command failed', 'EENVELOPE', str, 'DATA'));
         }
 
-        let response = {
+        const response = {
             accepted: this._envelope.accepted,
             rejected: this._envelope.rejected
         };
@@ -11836,12 +11738,9 @@ class SMTPConnection extends EventEmitter {
      */
     _actionSMTPStream(str, callback) {
         if (Number(str.charAt(0)) !== 2) {
-            // Message failed
             return callback(this._formatError('Message failed', 'EMESSAGE', str, 'DATA'));
-        } else {
-            // Message sent succesfully
-            return callback(null, str);
         }
+        return callback(null, str);
     }
 
     /**
@@ -12004,11 +11903,8 @@ class SMTPPool extends EventEmitter {
             component: this.options.component || 'smtp-pool'
         });
 
-        // temporary object
-        let connection = new SMTPConnection(this.options);
-
         this.name = 'SMTP (pool)';
-        this.version = packageData.version + '[client:' + connection.version + ']';
+        this.version = packageData.version + '[client:' + packageData.version + ']';
 
         this._rateLimit = {
             counter: 0,
@@ -12076,7 +11972,7 @@ class SMTPPool extends EventEmitter {
      */
     close() {
         let connection;
-        let len = this._connections.length;
+        const len = this._connections.length;
         this._closed = true;
 
         // clear rate limit timer if it exists
@@ -12117,7 +12013,7 @@ class SMTPPool extends EventEmitter {
         }
 
         // make sure that entire queue would be cleaned
-        let invokeCallbacks = () => {
+        const invokeCallbacks = () => {
             if (!this._queue.length) {
                 this.logger.debug(
                     {
@@ -12127,7 +12023,7 @@ class SMTPPool extends EventEmitter {
                 );
                 return;
             }
-            let entry = this._queue.shift();
+            const entry = this._queue.shift();
             if (entry && typeof entry.callback === 'function') {
                 try {
                     entry.callback(new Error('Connection pool was closed'));
@@ -12154,9 +12050,6 @@ class SMTPPool extends EventEmitter {
      * an available connection, then use this connection to send the mail
      */
     _processMessages() {
-        let connection;
-        let i, len;
-
         // do nothing if already closed
         if (this._closed) {
             return;
@@ -12173,12 +12066,7 @@ class SMTPPool extends EventEmitter {
         }
 
         // find first available connection
-        for (i = 0, len = this._connections.length; i < len; i++) {
-            if (this._connections[i].available) {
-                connection = this._connections[i];
-                break;
-            }
-        }
+        let connection = this._connections.find(c => c.available);
 
         if (!connection && this._connections.length < this.options.maxConnections) {
             connection = this._createConnection();
@@ -12196,7 +12084,7 @@ class SMTPPool extends EventEmitter {
             this.emit('idle');
         }
 
-        let entry = (connection.queueEntry = this._queue.shift());
+        const entry = (connection.queueEntry = this._queue.shift());
         entry.messageId = (connection.queueEntry.mail.message.getHeader('message-id') || '').replace(/[<>\s]/g, '');
 
         connection.available = false;
@@ -12247,7 +12135,7 @@ class SMTPPool extends EventEmitter {
      * Creates a new pool resource
      */
     _createConnection() {
-        let connection = new PoolResource(this);
+        const connection = new PoolResource(this);
 
         connection.id = ++this._connectionCounter;
 
@@ -12284,7 +12172,7 @@ class SMTPPool extends EventEmitter {
 
         // resource is terminated with an error
         connection.once('error', err => {
-            if (err.code !== 'EMAXLIMIT') {
+            if (err.code !== errors.EMAXLIMIT) {
                 this.logger.warn(
                     {
                         err,
@@ -12403,7 +12291,7 @@ class SMTPPool extends EventEmitter {
     }
 
     _requeueEntryOnConnectionClose(connection) {
-        connection.queueEntry.requeueAttempts = connection.queueEntry.requeueAttempts + 1;
+        connection.queueEntry.requeueAttempts += 1;
         this.logger.debug(
             {
                 tnx: 'pool',
@@ -12437,7 +12325,7 @@ class SMTPPool extends EventEmitter {
      * @param {Object} connection The PoolResource to remove
      */
     _removeConnection(connection) {
-        let index = this._connections.indexOf(connection);
+        const index = this._connections.indexOf(connection);
 
         if (index !== -1) {
             this._connections.splice(index, 1);
@@ -12454,7 +12342,7 @@ class SMTPPool extends EventEmitter {
             return callback();
         }
 
-        let now = Date.now();
+        const now = Date.now();
 
         if (this._rateLimit.counter < this._rateLimit.limit) {
             return callback();
@@ -12464,7 +12352,9 @@ class SMTPPool extends EventEmitter {
 
         if (this._rateLimit.checkpoint <= now - this._rateLimit.delta) {
             return this._clearRateLimit();
-        } else if (!this._rateLimit.timeout) {
+        }
+
+        if (!this._rateLimit.timeout) {
             this._rateLimit.timeout = setTimeout(() => this._clearRateLimit(), this._rateLimit.delta - (now - this._rateLimit.checkpoint));
             this._rateLimit.checkpoint = now;
         }
@@ -12481,7 +12371,7 @@ class SMTPPool extends EventEmitter {
 
         // resume all paused connections
         while (this._rateLimit.waiting.length) {
-            let cb = this._rateLimit.waiting.shift();
+            const cb = this._rateLimit.waiting.shift();
             setImmediate(cb);
         }
     }
@@ -12507,7 +12397,7 @@ class SMTPPool extends EventEmitter {
             });
         }
 
-        let auth = new PoolResource(this).auth;
+        const auth = new PoolResource(this).auth;
 
         this.getSocket(this.options, (err, socketOptions) => {
             if (err) {
@@ -12531,13 +12421,10 @@ class SMTPPool extends EventEmitter {
                     options.host || '',
                     options.port || ''
                 );
-                options = shared.assign(false, options);
-                Object.keys(socketOptions).forEach(key => {
-                    options[key] = socketOptions[key];
-                });
+                options = Object.assign(shared.assign(false, options), socketOptions);
             }
 
-            let connection = new SMTPConnection(options);
+            const connection = new SMTPConnection(options);
             let returned = false;
 
             connection.once('error', err => {
@@ -12557,7 +12444,7 @@ class SMTPPool extends EventEmitter {
                 return callback(new Error('Connection closed'));
             });
 
-            let finalize = () => {
+            const finalize = () => {
                 if (returned) {
                     return;
                 }
@@ -12586,7 +12473,7 @@ class SMTPPool extends EventEmitter {
                         finalize();
                     });
                 } else if (!auth && connection.allowsAuth && options.forceAuth) {
-                    let err = new Error('Authentication info was not provided');
+                    const err = new Error('Authentication info was not provided');
                     err.code = errors.ENOAUTH;
 
                     returned = true;
@@ -12636,7 +12523,7 @@ class PoolResource extends EventEmitter {
         if (this.options.auth) {
             switch ((this.options.auth.type || '').toString().toUpperCase()) {
                 case 'OAUTH2': {
-                    let oauth2 = new XOAuth2(this.options.auth, this.logger);
+                    const oauth2 = new XOAuth2(this.options.auth, this.logger);
                     oauth2.provisionCallback =
                         (this.pool.mailer && this.pool.mailer.get('oauth2_provision_cb')) || oauth2.provisionCallback;
                     this.auth = {
@@ -12703,10 +12590,7 @@ class PoolResource extends EventEmitter {
                     options.port || ''
                 );
 
-                options = assign(false, options);
-                Object.keys(socketOptions).forEach(key => {
-                    options[key] = socketOptions[key];
-                });
+                options = Object.assign(assign(false, options), socketOptions);
             }
 
             this.connection = new SMTPConnection(options);
@@ -12727,12 +12611,12 @@ class PoolResource extends EventEmitter {
                 }
                 returned = true;
 
-                let timer = setTimeout(() => {
+                const timer = setTimeout(() => {
                     if (returned) {
                         return;
                     }
                     // still have not returned, this means we have an unexpected connection close
-                    let err = new Error('Unexpected socket close');
+                    const err = new Error('Unexpected socket close');
                     if (this.connection && this.connection._socket && this.connection._socket.upgrading) {
                         // starttls connection errors
                         err.code = errors.ETLS;
@@ -12793,10 +12677,10 @@ class PoolResource extends EventEmitter {
             });
         }
 
-        let envelope = mail.message.getEnvelope();
-        let messageId = mail.message.messageId();
+        const envelope = mail.message.getEnvelope();
+        const messageId = mail.message.messageId();
 
-        let recipients = [].concat(envelope.to || []);
+        const recipients = [].concat(envelope.to || []);
         if (recipients.length > 3) {
             recipients.push('...and ' + recipients.splice(2).length + ' more');
         }
@@ -12837,9 +12721,8 @@ class PoolResource extends EventEmitter {
             info.messageId = messageId;
 
             setImmediate(() => {
-                let err;
                 if (this.messages >= this.options.maxMessages) {
-                    err = new Error('Resource exhausted');
+                    const err = new Error('Resource exhausted');
                     err.code = errors.EMAXLIMIT;
                     this.connection.close();
                     this.emit('error', err);
@@ -12929,11 +12812,8 @@ class SMTPTransport extends EventEmitter {
             component: this.options.component || 'smtp-transport'
         });
 
-        // temporary object
-        let connection = new SMTPConnection(this.options);
-
         this.name = 'SMTP';
-        this.version = packageData.version + '[client:' + connection.version + ']';
+        this.version = packageData.version + '[client:' + packageData.version + ']';
 
         if (this.options.auth) {
             this.auth = this.getAuth({});
@@ -12957,24 +12837,13 @@ class SMTPTransport extends EventEmitter {
             return this.auth;
         }
 
-        let hasAuth = false;
-        let authData = {};
+        const authData = Object.assign(
+            {},
+            this.options.auth && typeof this.options.auth === 'object' ? this.options.auth : {},
+            authOpts && typeof authOpts === 'object' ? authOpts : {}
+        );
 
-        if (this.options.auth && typeof this.options.auth === 'object') {
-            Object.keys(this.options.auth).forEach(key => {
-                hasAuth = true;
-                authData[key] = this.options.auth[key];
-            });
-        }
-
-        if (authOpts && typeof authOpts === 'object') {
-            Object.keys(authOpts).forEach(key => {
-                hasAuth = true;
-                authData[key] = authOpts[key];
-            });
-        }
-
-        if (!hasAuth) {
+        if (Object.keys(authData).length === 0) {
             return false;
         }
 
@@ -12983,7 +12852,7 @@ class SMTPTransport extends EventEmitter {
                 if (!authData.service && !authData.user) {
                     return false;
                 }
-                let oauth2 = new XOAuth2(authData, this.logger);
+                const oauth2 = new XOAuth2(authData, this.logger);
                 oauth2.provisionCallback = (this.mailer && this.mailer.get('oauth2_provision_cb')) || oauth2.provisionCallback;
                 oauth2.on('token', token => this.mailer.emit('token', token));
                 oauth2.on('error', err => this.emit('error', err));
@@ -13040,19 +12909,25 @@ class SMTPTransport extends EventEmitter {
                 );
 
                 // only copy options if we need to modify it
-                options = shared.assign(false, options);
-                Object.keys(socketOptions).forEach(key => {
-                    options[key] = socketOptions[key];
-                });
+                options = Object.assign(shared.assign(false, options), socketOptions);
             }
 
-            let connection = new SMTPConnection(options);
+            const connection = new SMTPConnection(options);
+
+            let perCallAuth;
+            const cleanupPerCallAuth = () => {
+                if (perCallAuth && perCallAuth !== this.auth && perCallAuth.oauth2) {
+                    perCallAuth.oauth2.removeAllListeners();
+                }
+                perCallAuth = null;
+            };
 
             connection.once('error', err => {
                 if (returned) {
                     return;
                 }
                 returned = true;
+                cleanupPerCallAuth();
                 connection.close();
                 return callback(err);
             });
@@ -13062,13 +12937,14 @@ class SMTPTransport extends EventEmitter {
                     return;
                 }
 
-                let timer = setTimeout(() => {
+                const timer = setTimeout(() => {
                     if (returned) {
                         return;
                     }
                     returned = true;
+                    cleanupPerCallAuth();
                     // still have not returned, this means we have an unexpected connection close
-                    let err = new Error('Unexpected socket close');
+                    const err = new Error('Unexpected socket close');
                     if (connection && connection._socket && connection._socket.upgrading) {
                         // starttls connection errors
                         err.code = errors.ETLS;
@@ -13083,11 +12959,11 @@ class SMTPTransport extends EventEmitter {
                 }
             });
 
-            let sendMessage = () => {
-                let envelope = mail.message.getEnvelope();
-                let messageId = mail.message.messageId();
+            const sendMessage = () => {
+                const envelope = mail.message.getEnvelope();
+                const messageId = mail.message.messageId();
 
-                let recipients = [].concat(envelope.to || []);
+                const recipients = [].concat(envelope.to || []);
                 if (recipients.length > 3) {
                     recipients.push('...and ' + recipients.splice(2).length + ' more');
                 }
@@ -13113,6 +12989,7 @@ class SMTPTransport extends EventEmitter {
 
                 connection.send(envelope, mail.message.createReadStream(), (err, info) => {
                     returned = true;
+                    cleanupPerCallAuth();
                     connection.close();
                     if (err) {
                         this.logger.error(
@@ -13152,13 +13029,11 @@ class SMTPTransport extends EventEmitter {
                     return;
                 }
 
-                let auth = this.getAuth(mail.data.auth);
+                perCallAuth = this.getAuth(mail.data.auth);
 
-                if (auth && (connection.allowsAuth || options.forceAuth)) {
-                    connection.login(auth, err => {
-                        if (auth && auth !== this.auth && auth.oauth2) {
-                            auth.oauth2.removeAllListeners();
-                        }
+                if (perCallAuth && (connection.allowsAuth || options.forceAuth)) {
+                    connection.login(perCallAuth, err => {
+                        cleanupPerCallAuth();
                         if (returned) {
                             return;
                         }
@@ -13215,20 +13090,25 @@ class SMTPTransport extends EventEmitter {
                     options.port || ''
                 );
 
-                options = shared.assign(false, options);
-                Object.keys(socketOptions).forEach(key => {
-                    options[key] = socketOptions[key];
-                });
+                options = Object.assign(shared.assign(false, options), socketOptions);
             }
 
-            let connection = new SMTPConnection(options);
+            const connection = new SMTPConnection(options);
             let returned = false;
+            let perCallAuth;
+            const cleanupPerCallAuth = () => {
+                if (perCallAuth && perCallAuth !== this.auth && perCallAuth.oauth2) {
+                    perCallAuth.oauth2.removeAllListeners();
+                }
+                perCallAuth = null;
+            };
 
             connection.once('error', err => {
                 if (returned) {
                     return;
                 }
                 returned = true;
+                cleanupPerCallAuth();
                 connection.close();
                 return callback(err);
             });
@@ -13238,14 +13118,16 @@ class SMTPTransport extends EventEmitter {
                     return;
                 }
                 returned = true;
+                cleanupPerCallAuth();
                 return callback(new Error('Connection closed'));
             });
 
-            let finalize = () => {
+            const finalize = () => {
                 if (returned) {
                     return;
                 }
                 returned = true;
+                cleanupPerCallAuth();
                 connection.quit();
                 return callback(null, true);
             };
@@ -13255,10 +13137,11 @@ class SMTPTransport extends EventEmitter {
                     return;
                 }
 
-                let authData = this.getAuth({});
+                perCallAuth = this.getAuth({});
 
-                if (authData && (connection.allowsAuth || options.forceAuth)) {
-                    connection.login(authData, err => {
+                if (perCallAuth && (connection.allowsAuth || options.forceAuth)) {
+                    connection.login(perCallAuth, err => {
+                        cleanupPerCallAuth();
                         if (returned) {
                             return;
                         }
@@ -13271,11 +13154,12 @@ class SMTPTransport extends EventEmitter {
 
                         finalize();
                     });
-                } else if (!authData && connection.allowsAuth && options.forceAuth) {
-                    let err = new Error('Authentication info was not provided');
+                } else if (!perCallAuth && connection.allowsAuth && options.forceAuth) {
+                    const err = new Error('Authentication info was not provided');
                     err.code = errors.ENOAUTH;
 
                     returned = true;
+                    cleanupPerCallAuth();
                     connection.close();
                     return callback(err);
                 } else {
@@ -13327,7 +13211,7 @@ class StreamTransport {
     constructor(options) {
         options = options || {};
 
-        this.options = options || {};
+        this.options = options;
 
         this.name = 'StreamTransport';
         this.version = packageData.version;
@@ -13349,10 +13233,10 @@ class StreamTransport {
         // We probably need this in the output
         mail.message.keepBcc = true;
 
-        let envelope = mail.data.envelope || mail.message.getEnvelope();
-        let messageId = mail.message.messageId();
+        const envelope = mail.data.envelope || mail.message.getEnvelope();
+        const messageId = mail.message.messageId();
 
-        let recipients = [].concat(envelope.to || []);
+        const recipients = [].concat(envelope.to || []);
         if (recipients.length > 3) {
             recipients.push('...and ' + recipients.splice(2).length + ' more');
         }
@@ -13400,13 +13284,13 @@ class StreamTransport {
                     );
                 });
                 return done(null, {
-                    envelope: mail.data.envelope || mail.message.getEnvelope(),
+                    envelope,
                     messageId,
                     message: stream
                 });
             }
 
-            let chunks = [];
+            const chunks = [];
             let chunklen = 0;
             stream.on('readable', () => {
                 let chunk;
@@ -13432,7 +13316,7 @@ class StreamTransport {
 
             stream.on('end', () =>
                 done(null, {
-                    envelope: mail.data.envelope || mail.message.getEnvelope(),
+                    envelope,
                     messageId,
                     message: Buffer.concat(chunks, chunklen)
                 })
@@ -13455,16 +13339,17 @@ const services = __nccwpck_require__(4105);
 const normalized = {};
 
 Object.keys(services).forEach(key => {
-    let service = services[key];
+    const service = services[key];
+    const normalizedService = normalizeService(service);
 
-    normalized[normalizeKey(key)] = normalizeService(service);
+    normalized[normalizeKey(key)] = normalizedService;
 
     [].concat(service.aliases || []).forEach(alias => {
-        normalized[normalizeKey(alias)] = normalizeService(service);
+        normalized[normalizeKey(alias)] = normalizedService;
     });
 
     [].concat(service.domains || []).forEach(domain => {
-        normalized[normalizeKey(domain)] = normalizeService(service);
+        normalized[normalizeKey(domain)] = normalizedService;
     });
 });
 
@@ -13473,11 +13358,10 @@ function normalizeKey(key) {
 }
 
 function normalizeService(service) {
-    let filter = ['domains', 'aliases'];
-    let response = {};
+    const response = {};
 
     Object.keys(service).forEach(key => {
-        if (filter.indexOf(key) < 0) {
+        if (!['domains', 'aliases'].includes(key)) {
             response[key] = service[key];
         }
     });
@@ -13505,7 +13389,7 @@ module.exports = function (key) {
 
 
 
-const Stream = (__nccwpck_require__(2203).Stream);
+const { Stream } = __nccwpck_require__(2203);
 const nmfetch = __nccwpck_require__(943);
 const crypto = __nccwpck_require__(6982);
 const shared = __nccwpck_require__(1284);
@@ -13538,6 +13422,7 @@ const errors = __nccwpck_require__(7633);
  * @param {Number} options.expires Optional Access Token expire time in ms
  * @param {Number} options.timeout Optional TTL for Access Token in seconds
  * @param {Function} options.provisionCallback Function to run when a new access token is required
+ * @param {Object} options.tls Optional TLS options forwarded to the HTTPS token request. Defaults to strict cert validation; supply { rejectUnauthorized: false } only for self-hosted OAuth providers on private CAs.
  */
 class XOAuth2 extends Stream {
     constructor(options, logger) {
@@ -13547,13 +13432,13 @@ class XOAuth2 extends Stream {
 
         if (options && options.serviceClient) {
             if (!options.privateKey || !options.user) {
-                let err = new Error('Options "privateKey" and "user" are required for service account!');
+                const err = new Error('Options "privateKey" and "user" are required for service account!');
                 err.code = errors.EOAUTH2;
                 setImmediate(() => this.emit('error', err));
                 return;
             }
 
-            let serviceRequestTimeout = Math.min(Math.max(Number(this.options.serviceRequestTimeout) || 0, 0), 3600);
+            const serviceRequestTimeout = Math.min(Math.max(Number(this.options.serviceRequestTimeout) || 0, 0), 3600);
             this.options.serviceRequestTimeout = serviceRequestTimeout || 5 * 60;
         }
 
@@ -13577,7 +13462,7 @@ class XOAuth2 extends Stream {
         if (this.options.expires && Number(this.options.expires)) {
             this.expires = this.options.expires;
         } else {
-            let timeout = Math.max(Number(this.options.timeout) || 0, 0);
+            const timeout = Math.max(Number(this.options.timeout) || 0, 0);
             this.expires = (timeout && Date.now() + timeout * 1000) || 0;
         }
 
@@ -13628,7 +13513,7 @@ class XOAuth2 extends Stream {
                 'Cannot renew access token for %s: No refresh mechanism available',
                 this.options.user
             );
-            let err = new Error("Can't create new access token for user");
+            const err = new Error("Can't create new access token for user");
             err.code = errors.EOAUTH2;
             return callback(err);
         }
@@ -13715,8 +13600,8 @@ class XOAuth2 extends Stream {
         let loggedUrlOptions;
         if (this.options.serviceClient) {
             // service account - https://developers.google.com/identity/protocols/OAuth2ServiceAccount
-            let iat = Math.floor(Date.now() / 1000); // unix time
-            let tokenData = {
+            const iat = Math.floor(Date.now() / 1000); // unix time
+            const tokenData = {
                 iss: this.options.serviceClient,
                 scope: this.options.scope || 'https://mail.google.com/',
                 sub: this.options.user,
@@ -13728,7 +13613,7 @@ class XOAuth2 extends Stream {
             try {
                 token = this.jwtSignRS256(tokenData);
             } catch (_err) {
-                let err = new Error("Can't generate token. Check your auth options");
+                const err = new Error("Can't generate token. Check your auth options");
                 err.code = errors.EOAUTH2;
                 return callback(err);
             }
@@ -13744,7 +13629,7 @@ class XOAuth2 extends Stream {
             };
         } else {
             if (!this.options.refreshToken) {
-                let err = new Error("Can't create new access token for user");
+                const err = new Error("Can't create new access token for user");
                 err.code = errors.EOAUTH2;
                 return callback(err);
             }
@@ -13765,10 +13650,8 @@ class XOAuth2 extends Stream {
             };
         }
 
-        Object.keys(this.options.customParams).forEach(key => {
-            urlOptions[key] = this.options.customParams[key];
-            loggedUrlOptions[key] = this.options.customParams[key];
-        });
+        Object.assign(urlOptions, this.options.customParams);
+        Object.assign(loggedUrlOptions, this.options.customParams);
 
         this.logger.debug(
             {
@@ -13803,19 +13686,15 @@ class XOAuth2 extends Stream {
                     'Response: %s',
                     (body || '').toString()
                 );
-                let err = new Error('Invalid authentication response');
+                const err = new Error('Invalid authentication response');
                 err.code = errors.EOAUTH2;
                 return callback(err);
             }
 
-            let logData = {};
-            Object.keys(data).forEach(key => {
-                if (key !== 'access_token') {
-                    logData[key] = data[key];
-                } else {
-                    logData[key] = (data[key] || '').toString().substr(0, 6) + '...';
-                }
-            });
+            const logData = Object.assign({}, data);
+            if (logData.access_token) {
+                logData.access_token = (logData.access_token || '').toString().substr(0, 6) + '...';
+            }
 
             this.logger.debug(
                 {
@@ -13836,7 +13715,7 @@ class XOAuth2 extends Stream {
                 if (data.error_uri) {
                     errorMessage += ' (' + data.error_uri + ')';
                 }
-                let err = new Error(errorMessage);
+                const err = new Error(errorMessage);
                 err.code = errors.EOAUTH2;
                 return callback(err);
             }
@@ -13846,7 +13725,7 @@ class XOAuth2 extends Stream {
                 return callback(null, this.accessToken);
             }
 
-            let err = new Error('No access token');
+            const err = new Error('No access token');
             err.code = errors.EOAUTH2;
             return callback(err);
         });
@@ -13859,7 +13738,7 @@ class XOAuth2 extends Stream {
      * @return {String} Base64 encoded token for IMAP or SMTP login
      */
     buildXOAuth2Token(accessToken) {
-        let authData = ['user=' + (this.options.user || ''), 'auth=Bearer ' + (accessToken || this.accessToken), '', ''];
+        const authData = ['user=' + (this.options.user || ''), 'auth=Bearer ' + (accessToken || this.accessToken), '', ''];
         return Buffer.from(authData.join('\x01'), 'utf-8').toString('base64');
     }
 
@@ -13878,15 +13757,27 @@ class XOAuth2 extends Stream {
     postRequest(url, payload, params, callback) {
         let returned = false;
 
-        let chunks = [];
+        const chunks = [];
         let chunklen = 0;
 
-        let req = nmfetch(url, {
+        const fetchOptions = {
             method: 'post',
             headers: params.customHeaders,
             body: payload,
             allowErrorResponse: true
-        });
+        };
+
+        // OAuth2 token endpoints are credential-bearing. lib/fetch defaults to
+        // rejectUnauthorized:false (intentional for self-signed attachment
+        // hosts), so opt back in to strict cert validation here when the
+        // access URL is HTTPS. params.tls (the user's options.tls) is layered
+        // on top so callers with a self-hosted provider on a private CA can
+        // still override.
+        if (/^https:/i.test(url)) {
+            fetchOptions.tls = Object.assign({ rejectUnauthorized: true }, params.tls || {});
+        }
+
+        const req = nmfetch(url, fetchOptions);
 
         req.on('readable', () => {
             let chunk;
@@ -13939,7 +13830,7 @@ class XOAuth2 extends Stream {
      */
     jwtSignRS256(payload) {
         payload = ['{"alg":"RS256","typ":"JWT"}', JSON.stringify(payload)].map(val => this.toBase64URL(val)).join('.');
-        let signature = crypto.createSign('RSA-SHA256').update(payload).sign(this.options.privateKey);
+        const signature = crypto.createSign('RSA-SHA256').update(payload).sign(this.options.privateKey);
         return payload + '.' + this.toBase64URL(signature);
     }
 }
@@ -16877,6 +16768,24 @@ class SecureProxyConnectionError extends UndiciError {
   [kSecureProxyConnectionError] = true
 }
 
+const kMessageSizeExceededError = Symbol.for('undici.error.UND_ERR_WS_MESSAGE_SIZE_EXCEEDED')
+class MessageSizeExceededError extends UndiciError {
+  constructor (message) {
+    super(message)
+    this.name = 'MessageSizeExceededError'
+    this.message = message || 'Max decompressed message size exceeded'
+    this.code = 'UND_ERR_WS_MESSAGE_SIZE_EXCEEDED'
+  }
+
+  static [Symbol.hasInstance] (instance) {
+    return instance && instance[kMessageSizeExceededError] === true
+  }
+
+  get [kMessageSizeExceededError] () {
+    return true
+  }
+}
+
 module.exports = {
   AbortError,
   HTTPParserError,
@@ -16900,7 +16809,8 @@ module.exports = {
   ResponseExceededMaxSizeError,
   RequestRetryError,
   ResponseError,
-  SecureProxyConnectionError
+  SecureProxyConnectionError,
+  MessageSizeExceededError
 }
 
 
@@ -16975,6 +16885,10 @@ class Request {
 
     if (upgrade && typeof upgrade !== 'string') {
       throw new InvalidArgumentError('upgrade must be a string')
+    }
+
+    if (upgrade && !isValidHeaderValue(upgrade)) {
+      throw new InvalidArgumentError('invalid upgrade header')
     }
 
     if (headersTimeout != null && (!Number.isFinite(headersTimeout) || headersTimeout < 0)) {
@@ -17271,13 +17185,19 @@ function processHeader (request, key, val) {
     val = `${val}`
   }
 
-  if (request.host === null && headerName === 'host') {
+  if (headerName === 'host') {
+    if (request.host !== null) {
+      throw new InvalidArgumentError('duplicate host header')
+    }
     if (typeof val !== 'string') {
       throw new InvalidArgumentError('invalid host header')
     }
     // Consumed by Client
     request.host = val
-  } else if (request.contentLength === null && headerName === 'content-length') {
+  } else if (headerName === 'content-length') {
+    if (request.contentLength !== null) {
+      throw new InvalidArgumentError('duplicate content-length header')
+    }
     request.contentLength = parseInt(val, 10)
     if (!Number.isFinite(request.contentLength)) {
       throw new InvalidArgumentError('invalid content-length header')
@@ -18296,8 +18216,6 @@ function defaultFactory (origin, opts) {
 
 class Agent extends DispatcherBase {
   constructor ({ factory = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
-    super()
-
     if (typeof factory !== 'function') {
       throw new InvalidArgumentError('factory must be a function.')
     }
@@ -18309,6 +18227,8 @@ class Agent extends DispatcherBase {
     if (!Number.isInteger(maxRedirections) || maxRedirections < 0) {
       throw new InvalidArgumentError('maxRedirections must be a positive number')
     }
+
+    super(options)
 
     if (connect && typeof connect !== 'function') {
       connect = { ...connect }
@@ -18903,27 +18823,69 @@ class Parser {
 
       const offset = llhttp.llhttp_get_error_pos(this.ptr) - currentBufferPtr
 
-      if (ret === constants.ERROR.PAUSED_UPGRADE) {
-        this.onUpgrade(data.slice(offset))
-      } else if (ret === constants.ERROR.PAUSED) {
-        this.paused = true
-        socket.unshift(data.slice(offset))
-      } else if (ret !== constants.ERROR.OK) {
-        const ptr = llhttp.llhttp_get_error_reason(this.ptr)
-        let message = ''
-        /* istanbul ignore else: difficult to make a test case for */
-        if (ptr) {
-          const len = new Uint8Array(llhttp.memory.buffer, ptr).indexOf(0)
-          message =
-            'Response does not match the HTTP/1.1 protocol (' +
-            Buffer.from(llhttp.memory.buffer, ptr, len).toString() +
-            ')'
+      if (ret !== constants.ERROR.OK) {
+        const body = data.subarray(offset)
+
+        if (ret === constants.ERROR.PAUSED_UPGRADE) {
+          this.onUpgrade(body)
+        } else if (ret === constants.ERROR.PAUSED) {
+          this.paused = true
+          socket.unshift(body)
+        } else {
+          throw this.createError(ret, body)
         }
-        throw new HTTPParserError(message, constants.ERROR[ret], data.slice(offset))
       }
     } catch (err) {
       util.destroy(socket, err)
     }
+  }
+
+  finish () {
+    assert(currentParser === null)
+    assert(this.ptr != null)
+    assert(!this.paused)
+
+    const { llhttp } = this
+
+    let ret
+
+    try {
+      currentParser = this
+      ret = llhttp.llhttp_finish(this.ptr)
+    } finally {
+      currentParser = null
+    }
+
+    if (ret === constants.ERROR.OK) {
+      return null
+    }
+
+    if (ret === constants.ERROR.PAUSED || ret === constants.ERROR.PAUSED_UPGRADE) {
+      this.paused = true
+      return null
+    }
+
+    return this.createError(ret, EMPTY_BUF)
+  }
+
+  createError (ret, data) {
+    const { llhttp, contentLength, bytesRead } = this
+
+    if (contentLength && bytesRead !== parseInt(contentLength, 10)) {
+      return new ResponseContentLengthMismatchError()
+    }
+
+    const ptr = llhttp.llhttp_get_error_reason(this.ptr)
+    let message = ''
+    if (ptr) {
+      const len = new Uint8Array(llhttp.memory.buffer, ptr).indexOf(0)
+      message =
+        'Response does not match the HTTP/1.1 protocol (' +
+        Buffer.from(llhttp.memory.buffer, ptr, len).toString() +
+        ')'
+    }
+
+    return new HTTPParserError(message, constants.ERROR[ret], data)
   }
 
   destroy () {
@@ -19297,8 +19259,11 @@ async function connectH1 (client, socket) {
     // On Mac OS, we get an ECONNRESET even if there is a full body to be forwarded
     // to the user.
     if (err.code === 'ECONNRESET' && parser.statusCode && !parser.shouldKeepAlive) {
-      // We treat all incoming data so for as a valid response.
-      parser.onMessageComplete()
+      const parserErr = parser.finish()
+      if (parserErr) {
+        this[kError] = parserErr
+        this[kClient][kOnError](parserErr)
+      }
       return
     }
 
@@ -19317,8 +19282,10 @@ async function connectH1 (client, socket) {
     const parser = this[kParser]
 
     if (parser.statusCode && !parser.shouldKeepAlive) {
-      // We treat all incoming data so far as a valid response.
-      parser.onMessageComplete()
+      const parserErr = parser.finish()
+      if (parserErr) {
+        util.destroy(this, parserErr)
+      }
       return
     }
 
@@ -19330,8 +19297,7 @@ async function connectH1 (client, socket) {
 
     if (parser) {
       if (!this[kError] && parser.statusCode && !parser.shouldKeepAlive) {
-        // We treat all incoming data so far as a valid response.
-        parser.onMessageComplete()
+        this[kError] = parser.finish() || this[kError]
       }
 
       this[kParser].destroy()
@@ -20858,9 +20824,10 @@ class Client extends DispatcherBase {
     autoSelectFamilyAttemptTimeout,
     // h2
     maxConcurrentStreams,
-    allowH2
+    allowH2,
+    webSocket
   } = {}) {
-    super()
+    super({ webSocket })
 
     if (keepAlive !== undefined) {
       throw new InvalidArgumentError('unsupported keepAlive, use pipelining=0 instead')
@@ -21392,15 +21359,23 @@ const { kDestroy, kClose, kClosed, kDestroyed, kDispatch, kInterceptors } = __nc
 const kOnDestroyed = Symbol('onDestroyed')
 const kOnClosed = Symbol('onClosed')
 const kInterceptedDispatch = Symbol('Intercepted Dispatch')
+const kWebSocketOptions = Symbol('webSocketOptions')
 
 class DispatcherBase extends Dispatcher {
-  constructor () {
+  constructor (opts) {
     super()
 
     this[kDestroyed] = false
     this[kOnDestroyed] = null
     this[kClosed] = false
     this[kOnClosed] = []
+    this[kWebSocketOptions] = opts?.webSocket ?? {}
+  }
+
+  get webSocketOptions () {
+    return {
+      maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
+    }
   }
 
   get destroyed () {
@@ -21960,8 +21935,8 @@ const kRemoveClient = Symbol('remove client')
 const kStats = Symbol('stats')
 
 class PoolBase extends DispatcherBase {
-  constructor () {
-    super()
+  constructor (opts) {
+    super(opts)
 
     this[kQueue] = new FixedQueue()
     this[kClients] = []
@@ -22220,8 +22195,6 @@ class Pool extends PoolBase {
     allowH2,
     ...options
   } = {}) {
-    super()
-
     if (connections != null && (!Number.isFinite(connections) || connections < 0)) {
       throw new InvalidArgumentError('invalid connections')
     }
@@ -22245,6 +22218,8 @@ class Pool extends PoolBase {
         ...connect
       })
     }
+
+    super(options)
 
     this[kInterceptors] = options.interceptors?.Pool && Array.isArray(options.interceptors.Pool)
       ? options.interceptors.Pool
@@ -39994,6 +39969,7 @@ module.exports = {
 
 const { createInflateRaw, Z_DEFAULT_WINDOWBITS } = __nccwpck_require__(8522)
 const { isValidClientWindowBits } = __nccwpck_require__(8625)
+const { MessageSizeExceededError } = __nccwpck_require__(8707)
 
 const tail = Buffer.from([0x00, 0x00, 0xff, 0xff])
 const kBuffer = Symbol('kBuffer')
@@ -40005,17 +39981,29 @@ class PerMessageDeflate {
 
   #options = {}
 
-  constructor (extensions) {
+  #maxPayloadSize = 0
+
+  /**
+   * @param {Map<string, string>} extensions
+   */
+  constructor (extensions, options) {
     this.#options.serverNoContextTakeover = extensions.has('server_no_context_takeover')
     this.#options.serverMaxWindowBits = extensions.get('server_max_window_bits')
+
+    this.#maxPayloadSize = options.maxPayloadSize
   }
 
+  /**
+   * Decompress a compressed payload.
+   * @param {Buffer} chunk Compressed data
+   * @param {boolean} fin Final fragment flag
+   * @param {Function} callback Callback function
+   */
   decompress (chunk, fin, callback) {
     // An endpoint uses the following algorithm to decompress a message.
     // 1.  Append 4 octets of 0x00 0x00 0xff 0xff to the tail end of the
     //     payload of the message.
     // 2.  Decompress the resulting data using DEFLATE.
-
     if (!this.#inflate) {
       let windowBits = Z_DEFAULT_WINDOWBITS
 
@@ -40028,13 +40016,26 @@ class PerMessageDeflate {
         windowBits = Number.parseInt(this.#options.serverMaxWindowBits)
       }
 
-      this.#inflate = createInflateRaw({ windowBits })
+      try {
+        this.#inflate = createInflateRaw({ windowBits })
+      } catch (err) {
+        callback(err)
+        return
+      }
       this.#inflate[kBuffer] = []
       this.#inflate[kLength] = 0
 
       this.#inflate.on('data', (data) => {
-        this.#inflate[kBuffer].push(data)
         this.#inflate[kLength] += data.length
+
+        if (this.#maxPayloadSize > 0 && this.#inflate[kLength] > this.#maxPayloadSize) {
+          callback(new MessageSizeExceededError())
+          this.#inflate.removeAllListeners()
+          this.#inflate = null
+          return
+        }
+
+        this.#inflate[kBuffer].push(data)
       })
 
       this.#inflate.on('error', (err) => {
@@ -40049,6 +40050,10 @@ class PerMessageDeflate {
     }
 
     this.#inflate.flush(() => {
+      if (!this.#inflate) {
+        return
+      }
+
       const full = Buffer.concat(this.#inflate[kBuffer], this.#inflate[kLength])
 
       this.#inflate[kBuffer].length = 0
@@ -40087,6 +40092,7 @@ const {
 const { WebsocketFrameSend } = __nccwpck_require__(3264)
 const { closeWebSocketConnection } = __nccwpck_require__(6897)
 const { PerMessageDeflate } = __nccwpck_require__(9469)
+const { MessageSizeExceededError } = __nccwpck_require__(8707)
 
 // This code was influenced by ws released under the MIT license.
 // Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>
@@ -40095,6 +40101,7 @@ const { PerMessageDeflate } = __nccwpck_require__(9469)
 
 class ByteParser extends Writable {
   #buffers = []
+  #fragmentsBytes = 0
   #byteOffset = 0
   #loop = false
 
@@ -40106,14 +40113,23 @@ class ByteParser extends Writable {
   /** @type {Map<string, PerMessageDeflate>} */
   #extensions
 
-  constructor (ws, extensions) {
+  /** @type {number} */
+  #maxPayloadSize
+
+  /**
+   * @param {import('./websocket').WebSocket} ws
+   * @param {Map<string, string>|null} extensions
+   * @param {{ maxPayloadSize?: number }} [options]
+   */
+  constructor (ws, extensions, options = {}) {
     super()
 
     this.ws = ws
     this.#extensions = extensions == null ? new Map() : extensions
+    this.#maxPayloadSize = options.maxPayloadSize ?? 0
 
     if (this.#extensions.has('permessage-deflate')) {
-      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions))
+      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions, options))
     }
   }
 
@@ -40127,6 +40143,19 @@ class ByteParser extends Writable {
     this.#loop = true
 
     this.run(callback)
+  }
+
+  #validatePayloadLength () {
+    if (
+      this.#maxPayloadSize > 0 &&
+      !isControlFrame(this.#info.opcode) &&
+      this.#info.payloadLength > this.#maxPayloadSize
+    ) {
+      failWebsocketConnection(this.ws, 'Payload size exceeds maximum allowed size')
+      return false
+    }
+
+    return true
   }
 
   /**
@@ -40217,6 +40246,10 @@ class ByteParser extends Writable {
         if (payloadLength <= 125) {
           this.#info.payloadLength = payloadLength
           this.#state = parserStates.READ_DATA
+
+          if (!this.#validatePayloadLength()) {
+            return
+          }
         } else if (payloadLength === 126) {
           this.#state = parserStates.PAYLOADLENGTH_16
         } else if (payloadLength === 127) {
@@ -40241,6 +40274,10 @@ class ByteParser extends Writable {
 
         this.#info.payloadLength = buffer.readUInt16BE(0)
         this.#state = parserStates.READ_DATA
+
+        if (!this.#validatePayloadLength()) {
+          return
+        }
       } else if (this.#state === parserStates.PAYLOADLENGTH_64) {
         if (this.#byteOffset < 8) {
           return callback()
@@ -40248,6 +40285,7 @@ class ByteParser extends Writable {
 
         const buffer = this.consume(8)
         const upper = buffer.readUInt32BE(0)
+        const lower = buffer.readUInt32BE(4)
 
         // 2^31 is the maximum bytes an arraybuffer can contain
         // on 32-bit systems. Although, on 64-bit systems, this is
@@ -40255,15 +40293,17 @@ class ByteParser extends Writable {
         // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Errors/Invalid_array_length
         // https://source.chromium.org/chromium/chromium/src/+/main:v8/src/common/globals.h;drc=1946212ac0100668f14eb9e2843bdd846e510a1e;bpv=1;bpt=1;l=1275
         // https://source.chromium.org/chromium/chromium/src/+/main:v8/src/objects/js-array-buffer.h;l=34;drc=1946212ac0100668f14eb9e2843bdd846e510a1e
-        if (upper > 2 ** 31 - 1) {
+        if (upper !== 0 || lower > 2 ** 31 - 1) {
           failWebsocketConnection(this.ws, 'Received payload length > 2^31 bytes.')
           return
         }
 
-        const lower = buffer.readUInt32BE(4)
-
-        this.#info.payloadLength = (upper << 8) + lower
+        this.#info.payloadLength = lower
         this.#state = parserStates.READ_DATA
+
+        if (!this.#validatePayloadLength()) {
+          return
+        }
       } else if (this.#state === parserStates.READ_DATA) {
         if (this.#byteOffset < this.#info.payloadLength) {
           return callback()
@@ -40276,42 +40316,53 @@ class ByteParser extends Writable {
           this.#state = parserStates.INFO
         } else {
           if (!this.#info.compressed) {
-            this.#fragments.push(body)
+            this.writeFragments(body)
+
+            if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
+              failWebsocketConnection(this.ws, new MessageSizeExceededError().message)
+              return
+            }
 
             // If the frame is not fragmented, a message has been received.
             // If the frame is fragmented, it will terminate with a fin bit set
             // and an opcode of 0 (continuation), therefore we handle that when
             // parsing continuation frames, not here.
             if (!this.#info.fragmented && this.#info.fin) {
-              const fullMessage = Buffer.concat(this.#fragments)
-              websocketMessageReceived(this.ws, this.#info.binaryType, fullMessage)
-              this.#fragments.length = 0
+              websocketMessageReceived(this.ws, this.#info.binaryType, this.consumeFragments())
             }
 
             this.#state = parserStates.INFO
           } else {
-            this.#extensions.get('permessage-deflate').decompress(body, this.#info.fin, (error, data) => {
-              if (error) {
-                closeWebSocketConnection(this.ws, 1007, error.message, error.message.length)
-                return
-              }
+            this.#extensions.get('permessage-deflate').decompress(
+              body,
+              this.#info.fin,
+              (error, data) => {
+                if (error) {
+                  failWebsocketConnection(this.ws, error.message)
+                  return
+                }
 
-              this.#fragments.push(data)
+                this.writeFragments(data)
 
-              if (!this.#info.fin) {
-                this.#state = parserStates.INFO
+                if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
+                  failWebsocketConnection(this.ws, new MessageSizeExceededError().message)
+                  return
+                }
+
+                if (!this.#info.fin) {
+                  this.#state = parserStates.INFO
+                  this.#loop = true
+                  this.run(callback)
+                  return
+                }
+
+                websocketMessageReceived(this.ws, this.#info.binaryType, this.consumeFragments())
+
                 this.#loop = true
+                this.#state = parserStates.INFO
                 this.run(callback)
-                return
               }
-
-              websocketMessageReceived(this.ws, this.#info.binaryType, Buffer.concat(this.#fragments))
-
-              this.#loop = true
-              this.#state = parserStates.INFO
-              this.#fragments.length = 0
-              this.run(callback)
-            })
+            )
 
             this.#loop = false
             break
@@ -40361,6 +40412,26 @@ class ByteParser extends Writable {
     this.#byteOffset -= n
 
     return buffer
+  }
+
+  writeFragments (fragment) {
+    this.#fragmentsBytes += fragment.length
+    this.#fragments.push(fragment)
+  }
+
+  consumeFragments () {
+    const fragments = this.#fragments
+
+    if (fragments.length === 1) {
+      this.#fragmentsBytes = 0
+      return fragments.shift()
+    }
+
+    const output = Buffer.concat(fragments, this.#fragmentsBytes)
+    this.#fragments = []
+    this.#fragmentsBytes = 0
+
+    return output
   }
 
   parseCloseBody (data) {
@@ -40896,6 +40967,12 @@ function parseExtensions (extensions) {
  * @param {string} value
  */
 function isValidClientWindowBits (value) {
+  // Must have at least one character
+  if (value.length === 0) {
+    return false
+  }
+
+  // Check all characters are ASCII digits
   for (let i = 0; i < value.length; i++) {
     const byte = value.charCodeAt(i)
 
@@ -40904,7 +40981,9 @@ function isValidClientWindowBits (value) {
     }
   }
 
-  return true
+  // Check numeric range: zlib requires windowBits in range 8-15
+  const num = Number.parseInt(value, 10)
+  return num >= 8 && num <= 15
 }
 
 // https://nodejs.org/api/intl.html#detecting-internationalization-support
@@ -41382,11 +41461,15 @@ class WebSocket extends EventTarget {
    * @see https://websockets.spec.whatwg.org/#feedback-from-the-protocol
    */
   #onConnectionEstablished (response, parsedExtensions) {
-    // processResponse is called when the "response’s header list has been received and initialized."
+    // processResponse is called when the "response's header list has been received and initialized."
     // once this happens, the connection is open
     this[kResponse] = response
 
-    const parser = new ByteParser(this, parsedExtensions)
+    const maxPayloadSize = this[kController]?.dispatcher?.webSocketOptions?.maxPayloadSize
+
+    const parser = new ByteParser(this, parsedExtensions, {
+      maxPayloadSize
+    })
     parser.on('drain', onParserDrain)
     parser.on('error', onParserError.bind(this))
 
@@ -41810,7 +41893,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"126":{"description":"126 Mail (NetEa
 /***/ 6710:
 /***/ ((module) => {
 
-module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"8.0.1","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 test/**/*.test.js test/**/*-test.js","test:coverage":"c8 node --test --test-concurrency=1 test/**/*.test.js test/**/*-test.js","format":"prettier --write \\"**/*.{js,json,md}\\"","format:check":"prettier --check \\"**/*.{js,json,md}\\"","lint":"eslint .","lint:fix":"eslint . --fix","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-sesv2":"3.985.0","bunyan":"1.8.15","c8":"10.1.3","eslint":"10.0.0","eslint-config-prettier":"10.1.8","globals":"17.3.0","libbase64":"1.3.0","libmime":"5.3.7","libqp":"2.1.1","nodemailer-ntlm-auth":"1.0.4","prettier":"3.8.1","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.18.1"},"engines":{"node":">=6.0.0"}}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"8.0.10","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","test:coverage":"c8 node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","format":"prettier --write \\"**/*.{js,json,md}\\"","format:check":"prettier --check \\"**/*.{js,json,md}\\"","lint":"eslint .","lint:fix":"eslint . --fix","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install","test:syntax":"docker run --rm -v \\"$PWD:/app:ro\\" -w /app node:6-alpine node test/syntax-compat.js"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-sesv2":"3.1037.0","bunyan":"1.8.15","c8":"11.0.0","eslint":"10.2.1","eslint-config-prettier":"10.1.8","globals":"17.5.0","libbase64":"1.3.0","libmime":"5.3.8","libqp":"2.1.1","prettier":"3.8.3","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.18.4"},"engines":{"node":">=6.0.0"}}');
 
 /***/ })
 
