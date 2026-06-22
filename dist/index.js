@@ -1304,7 +1304,7 @@ for (const code of Object.keys(ERROR_CODES)) {
 
 // module to handle cookies
 
-const urllib = __nccwpck_require__(7016);
+const urllib = __nccwpck_require__(3101);
 
 const SESSION_TIMEOUT = 1800; // 30 min
 
@@ -1587,7 +1587,7 @@ module.exports = Cookies;
 
 const http = __nccwpck_require__(8611);
 const https = __nccwpck_require__(5692);
-const urllib = __nccwpck_require__(7016);
+const urllib = __nccwpck_require__(3101);
 const zlib = __nccwpck_require__(3106);
 const { PassThrough } = __nccwpck_require__(2203);
 const Cookies = __nccwpck_require__(4312);
@@ -1708,7 +1708,10 @@ function nmfetch(url, options) {
         path: parsed.path,
         port: parsed.port ? parsed.port : parsed.protocol === 'https:' ? 443 : 80,
         headers,
-        rejectUnauthorized: false,
+        // Validate TLS certificates by default. Callers that genuinely need to
+        // reach a self-signed/internal host opt out explicitly with
+        // options.tls = { rejectUnauthorized: false }.
+        rejectUnauthorized: true,
         agent: false
     };
 
@@ -1797,7 +1800,27 @@ function nmfetch(url, options) {
             // redirect does not include POST body
             options.method = 'GET';
             options.body = false;
-            return nmfetch(urllib.resolve(url, res.headers.location), options);
+
+            const redirectUrl = urllib.resolve(url, res.headers.location);
+            const redirectParsed = urllib.parse(redirectUrl);
+
+            // Do not forward credentials when the redirect leaves the original
+            // security context: a different host, or a downgrade from https to
+            // http (which would otherwise put them on the wire in cleartext).
+            // Strip sensitive request headers so an attacker who controls the
+            // redirect target cannot harvest them.
+            const crossHost = redirectParsed.hostname !== parsed.hostname;
+            const downgrade = parsed.protocol === 'https:' && redirectParsed.protocol === 'http:';
+            if (options.headers && (crossHost || downgrade)) {
+                const sensitive = ['authorization', 'cookie', 'proxy-authorization'];
+                Object.keys(options.headers).forEach(key => {
+                    if (sensitive.includes(key.toLowerCase())) {
+                        delete options.headers[key];
+                    }
+                });
+            }
+
+            return nmfetch(redirectUrl, options);
         }
 
         fetchRes.statusCode = res.statusCode;
@@ -1991,7 +2014,11 @@ class MailComposer {
 
         // Compose MIME tree
         if (this.mail.raw) {
-            this.message = new MimeNode('message/rfc822', { newline: this.mail.newline }).setRaw(this.mail.raw);
+            this.message = new MimeNode('message/rfc822', {
+                newline: this.mail.newline,
+                disableUrlAccess: this.mail.disableUrlAccess,
+                disableFileAccess: this.mail.disableFileAccess
+            }).setRaw(this.mail.raw);
         } else if (this._useMixed) {
             this.message = this._createMixed();
         } else if (this._useAlternative) {
@@ -2042,7 +2069,7 @@ class MailComposer {
      * @returns {Object} An object of arrays (`related` and `attached`)
      */
     getAttachments(findRelated) {
-        let icalEvent, eventObject;
+        let eventObject;
         const attachments = [].concat(this.mail.attachments || []).map((attachment, i) => {
             if (/^data:/i.test(attachment.path || attachment.href)) {
                 attachment = this._processDataUrl(attachment);
@@ -2101,7 +2128,8 @@ class MailComposer {
             } else if (attachment.href) {
                 data.content = {
                     href: attachment.href,
-                    httpHeaders: attachment.httpHeaders
+                    httpHeaders: attachment.httpHeaders,
+                    tls: attachment.tls
                 };
             } else {
                 data.content = attachment.content || '';
@@ -2119,18 +2147,7 @@ class MailComposer {
         });
 
         if (this.mail.icalEvent) {
-            if (
-                typeof this.mail.icalEvent === 'object' &&
-                (this.mail.icalEvent.content || this.mail.icalEvent.path || this.mail.icalEvent.href || this.mail.icalEvent.raw)
-            ) {
-                icalEvent = this.mail.icalEvent;
-            } else {
-                icalEvent = {
-                    content: this.mail.icalEvent
-                };
-            }
-
-            eventObject = Object.assign({}, icalEvent);
+            eventObject = Object.assign({}, this._getIcalEvent());
 
             eventObject.contentType = 'application/ics';
             if (!eventObject.headers) {
@@ -2155,13 +2172,74 @@ class MailComposer {
     }
 
     /**
+     * Returns the icalEvent value with `path`/`href`/data uri input normalized into
+     * a `content` entry, the same way as for regular attachments. The same event is
+     * included twice (as a text/calendar alternative and as an application/ics
+     * attachment), so the shared content object is marked to be resolved just once
+     * and the buffered result is reused by the second node.
+     *
+     * @returns {Object} Normalized icalEvent data
+     */
+    _getIcalEvent() {
+        if (!this._icalEvent) {
+            let icalEvent;
+            if (
+                typeof this.mail.icalEvent === 'object' &&
+                (this.mail.icalEvent.content || this.mail.icalEvent.path || this.mail.icalEvent.href || this.mail.icalEvent.raw)
+            ) {
+                icalEvent = Object.assign({}, this.mail.icalEvent);
+            } else {
+                icalEvent = {
+                    content: this.mail.icalEvent
+                };
+            }
+
+            if (/^data:/i.test(icalEvent.path || icalEvent.href)) {
+                icalEvent = this._processDataUrl(icalEvent);
+            }
+
+            if (/^https?:\/\//i.test(icalEvent.path)) {
+                icalEvent.href = icalEvent.path;
+                icalEvent.path = undefined;
+            }
+
+            if (!icalEvent.raw) {
+                // map file path and URL values into `content`, otherwise the content
+                // nodes would render an empty body
+                if (icalEvent.path) {
+                    icalEvent.content = {
+                        path: icalEvent.path
+                    };
+                    icalEvent.path = undefined;
+                } else if (icalEvent.href) {
+                    icalEvent.content = {
+                        href: icalEvent.href,
+                        httpHeaders: icalEvent.httpHeaders
+                    };
+                    icalEvent.href = undefined;
+                }
+            }
+
+            if (icalEvent.content && typeof icalEvent.content === 'object') {
+                // we are going to have the same attachment twice, so mark this to be
+                // resolved just once
+                icalEvent.content._resolve = true;
+            }
+
+            this._icalEvent = icalEvent;
+        }
+
+        return this._icalEvent;
+    }
+
+    /**
      * List alternatives. Resulting objects can be used as input for MimeNode nodes
      *
      * @returns {Array} An array of alternative elements. Includes the `text` and `html` values as well
      */
     getAlternatives() {
         const alternatives = [];
-        let text, html, watchHtml, amp, icalEvent, eventObject;
+        let text, html, watchHtml, amp, eventObject;
 
         if (this.mail.text) {
             if (
@@ -2207,24 +2285,7 @@ class MailComposer {
 
         // NB! when including attachments with a calendar alternative you might end up in a blank screen on some clients
         if (this.mail.icalEvent) {
-            if (
-                typeof this.mail.icalEvent === 'object' &&
-                (this.mail.icalEvent.content || this.mail.icalEvent.path || this.mail.icalEvent.href || this.mail.icalEvent.raw)
-            ) {
-                icalEvent = this.mail.icalEvent;
-            } else {
-                icalEvent = {
-                    content: this.mail.icalEvent
-                };
-            }
-
-            eventObject = Object.assign({}, icalEvent);
-
-            if (eventObject.content && typeof eventObject.content === 'object') {
-                // we are going to have the same attachment twice, so mark this to be
-                // resolved just once
-                eventObject.content._resolve = true;
-            }
+            eventObject = Object.assign({}, this._getIcalEvent());
 
             eventObject.filename = false;
             eventObject.contentType =
@@ -2573,7 +2634,7 @@ const DKIM = __nccwpck_require__(22);
 const httpProxyClient = __nccwpck_require__(795);
 const errors = __nccwpck_require__(7633);
 const util = __nccwpck_require__(9023);
-const urllib = __nccwpck_require__(7016);
+const urllib = __nccwpck_require__(3101);
 const packageData = __nccwpck_require__(6710);
 const MailMessage = __nccwpck_require__(7576);
 const net = __nccwpck_require__(9278);
@@ -2889,7 +2950,7 @@ class Mail extends EventEmitter {
                 // Connect using a HTTP CONNECT method
                 case 'http':
                 case 'https':
-                    httpProxyClient(proxy.href, options.port, options.host, (err, socket) => {
+                    httpProxyClient(proxy.href, options.port, options.host, this.options.tls || {}, (err, socket) => {
                         if (err) {
                             return callback(err);
                         }
@@ -3307,7 +3368,11 @@ class MailMessage {
                                     comment = mimeFuncs.encodeWord(comment);
                                 }
 
-                                return (value.comment ? comment + ' ' : '') + this._formatListUrl(value.url).replace(/^<[^:]+\/{,2}/, '');
+                                // List-ID expects a bare domain-like identifier, so strip the
+                                // scheme prefix that _formatListUrl adds or passes through
+                                return (
+                                    (value.comment ? comment + ' ' : '') + this._formatListUrl(value.url).replace(/^<[^:]+:\/{0,2}/, '<')
+                                );
                             }
 
                             // List-*: <http://domain> (comment)
@@ -6055,7 +6120,7 @@ module.exports = {
         if (!mimeType) {
             return defaultExtension;
         }
-        const parts = (mimeType || '').toLowerCase().trim().split('/');
+        const parts = mimeType.toLowerCase().trim().split('/');
         const rootType = parts.shift().trim();
         const subType = parts.join('/').trim();
 
@@ -7090,7 +7155,7 @@ class MimeNode {
                 return contentStream;
             }
             // fetch URL
-            return nmfetch(content.href, { headers: content.httpHeaders });
+            return nmfetch(content.href, { headers: content.httpHeaders, tls: content.tls });
         }
 
         // pass string or buffer content as a stream
@@ -7674,10 +7739,10 @@ module.exports.createTestAccount = function (apiUrl, callback) {
         body: Buffer.from(JSON.stringify(requestBody))
     };
 
-    // Credential-bearing request — opt back into strict cert validation when
-    // the API URL is HTTPS. lib/fetch defaults to rejectUnauthorized:false
-    // for attachment hosts that may be self-signed; the Ethereal API has a
-    // real cert, so the lax default was a free attack surface.
+    // Credential-bearing request to the Ethereal API. lib/fetch already
+    // validates certs by default; pin rejectUnauthorized:true here so this
+    // call stays strict regardless of any future default change and is never
+    // relaxed for a real-cert endpoint.
     if (/^https:/i.test(apiUrl)) {
         fetchOptions.tls = { rejectUnauthorized: true };
     }
@@ -7719,11 +7784,20 @@ module.exports.getTestMessageUrl = function (info) {
     }
 
     const infoProps = new Map();
-    info.response.replace(/\[([^\]]+)\]$/, (m, props) => {
-        props.replace(/\b([A-Z0-9]+)=([^\s]+)/g, (m, key, value) => {
-            infoProps.set(key, value);
-        });
-    });
+
+    // Extract the trailing "[...]" part of the response (no "]" allowed inside)
+    // with linear string scanning; the equivalent regex /\[([^\]]+)\]$/ was
+    // flagged for polynomial backtracking on adversarial server responses
+    const response = info.response.toString();
+    if (response.length > 2 && response.charAt(response.length - 1) === ']') {
+        const open = response.indexOf('[', response.lastIndexOf(']', response.length - 2) + 1);
+        if (open >= 0 && open < response.length - 2) {
+            const props = response.substring(open + 1, response.length - 1);
+            props.replace(/\b([A-Z0-9]+)=([^\s]+)/g, (m, key, value) => {
+                infoProps.set(key, value);
+            });
+        }
+    }
 
     if (infoProps.has('STATUS') && infoProps.has('MSGID')) {
         return (testAccount.web || ETHEREAL_WEB) + '/message/' + infoProps.get('MSGID');
@@ -8448,6 +8522,8 @@ const { spawn } = __nccwpck_require__(5317);
 const packageData = __nccwpck_require__(6710);
 const shared = __nccwpck_require__(1284);
 const errors = __nccwpck_require__(7633);
+const LeWindows = __nccwpck_require__(7793);
+const LeUnix = __nccwpck_require__(348);
 
 /**
  * Generates a Transport object for Sendmail
@@ -8490,6 +8566,8 @@ class SendmailTransport {
                 this.args = options.args;
             }
         }
+
+        this.winbreak = ['win', 'windows', 'dos', '\r\n'].includes((options.newline || '').toString().toLowerCase());
     }
 
     /**
@@ -8622,7 +8700,15 @@ class SendmailTransport {
             );
 
             const sourceStream = mail.message.createReadStream();
-            sourceStream.once('error', err => {
+            let stream = sourceStream;
+            if (this.options.newline) {
+                // apply the transport-level line ending transform; the message-level
+                // `newline` option is handled by MimeNode in createReadStream()
+                stream = sourceStream.pipe(this.winbreak ? new LeWindows() : new LeUnix());
+                sourceStream.once('error', err => stream.emit('error', err));
+            }
+
+            stream.once('error', err => {
                 this.logger.error(
                     {
                         err,
@@ -8637,7 +8723,7 @@ class SendmailTransport {
                 callback(err);
             });
 
-            sourceStream.pipe(sendmail.stdin);
+            stream.pipe(sendmail.stdin);
         } else {
             const err = new Error('sendmail was not found');
             err.code = errors.ESENDMAIL;
@@ -8659,8 +8745,21 @@ module.exports = SendmailTransport;
 const EventEmitter = __nccwpck_require__(4434);
 const packageData = __nccwpck_require__(6710);
 const shared = __nccwpck_require__(1284);
+const errors = __nccwpck_require__(7633);
 const LeWindows = __nccwpck_require__(7793);
 const MimeNode = __nccwpck_require__(6628);
+
+/**
+ * Tags AWS SDK rejections that carry no `code` property (SDK v3 errors only
+ * have a `name`) with the generic SES transport error code, keeping the
+ * original error object intact
+ */
+function tagSesError(err) {
+    if (err && typeof err === 'object' && !err.code) {
+        err.code = errors.ESES;
+    }
+    return err;
+}
 
 /**
  * Generates a Transport object for AWS SES
@@ -8813,6 +8912,7 @@ class SESTransport extends EventEmitter {
                             });
                         })
                         .catch(err => {
+                            tagSesError(err);
                             this.logger.error(
                                 {
                                     err,
@@ -8844,7 +8944,7 @@ class SESTransport extends EventEmitter {
 
         const cb = err => {
             if (err && !['InvalidParameterValue', 'MessageRejected'].includes(err.code || err.Code || err.name)) {
-                return callback(err);
+                return callback(tagSesError(err));
             }
             return callback(null, true);
         };
@@ -8861,15 +8961,13 @@ class SESTransport extends EventEmitter {
             }
         };
 
-        this.getRegion((err, region) => {
-            if (err || !region) {
-                region = 'us-east-1';
-            }
-
+        // the region value is not used for anything when verifying, but the lookup
+        // exercises the client configuration the same way as send() does
+        this.getRegion(() => {
             const command = new this.ses.SendEmailCommand(sesMessage);
             const sendPromise = this.ses.sesClient.send(command);
 
-            sendPromise.then(data => cb(null, data)).catch(err => cb(err));
+            sendPromise.then(() => cb(null)).catch(err => cb(err));
         });
 
         return promise;
@@ -8888,7 +8986,7 @@ module.exports = SESTransport;
 
 
 
-const urllib = __nccwpck_require__(7016);
+const urllib = __nccwpck_require__(3101);
 const util = __nccwpck_require__(9023);
 const fs = __nccwpck_require__(9896);
 const nmfetch = __nccwpck_require__(943);
@@ -9416,6 +9514,12 @@ module.exports.resolveContent = (data, key, options, callback) => {
         });
     }
 
+    resolveContentValue(data, key, options, callback);
+
+    return promise;
+};
+
+function resolveContentValue(data, key, options, callback) {
     let content = (data && data[key] && data[key].content) || data[key];
     const encoding = ((typeof data[key] === 'object' && data[key].encoding) || 'utf8')
         .toString()
@@ -9449,14 +9553,11 @@ module.exports.resolveContent = (data, key, options, callback) => {
                     callback(err);
                 });
             }
-            return resolveStream(nmfetch(content.path || content.href), callback);
+            return resolveStream(nmfetch(content.path || content.href, { headers: content.httpHeaders, tls: content.tls }), callback);
         } else if (/^data:/i.test(content.path || content.href)) {
             const parsedDataUri = module.exports.parseDataURI(content.path || content.href);
 
-            if (!parsedDataUri || !parsedDataUri.data) {
-                return callback(null, Buffer.from(0));
-            }
-            return callback(null, parsedDataUri.data);
+            return callback(null, parsedDataUri && parsedDataUri.data ? parsedDataUri.data : Buffer.alloc(0));
         } else if (content.path) {
             if (options.disableFileAccess) {
                 return setImmediate(() => {
@@ -9475,9 +9576,7 @@ module.exports.resolveContent = (data, key, options, callback) => {
 
     // default action, return as is
     setImmediate(() => callback(null, content));
-
-    return promise;
-};
+}
 
 /**
  * Copies properties from source objects to target objects
@@ -9618,6 +9717,164 @@ function createDefaultLogger(levels) {
 
 /***/ }),
 
+/***/ 3101:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+// URL parsing wrapper. Prefers the WHATWG `URL` (a global on Node 10+, and
+// available as `require('url').URL` since Node 6.13+) and only falls back to the
+// legacy, deprecation-warning-emitting `url.parse()` / `url.resolve()` on ancient
+// Node versions that predate the WHATWG implementation.
+//
+// The WHATWG `URL` exposes a different shape than the legacy parser, so results
+// are normalized back into the legacy field names the rest of the codebase reads
+// (`protocol`, `hostname`, `port`, `pathname`, `path`, `search`, `auth`, `query`,
+// `href`). This keeps every existing call site unchanged.
+//
+// Known, accepted divergences from the legacy parser:
+//  - non-special schemes (smtp:/smtps:/direct:) are not host-lowercased by
+//    WHATWG; cosmetic only, SMTP/DNS hosts are case-insensitive. (IDNA mapping
+//    and IPv6 brackets are normalized back by normalizeHostname below.)
+//  - a literal unescaped ':' inside a password is percent-encoded by WHATWG;
+//    such passwords should be percent-encoded by the caller anyway.
+
+const urllib = __nccwpck_require__(7016);
+const punycode = __nccwpck_require__(5014);
+
+// WHATWG URL constructor if available, otherwise undefined (Node < 6.13).
+const URLImpl = (typeof URL !== 'undefined' && URL) || urllib.URL;
+
+// Matches a "scheme:" not followed by "//" (and with something after it), used
+// to re-insert the authority separator the legacy parser did not require.
+const SLASHLESS_AUTHORITY = /^([a-zA-Z][a-zA-Z0-9+.-]*:)(?!\/\/)(.+)$/;
+
+// decodeURIComponent that never throws. Legacy url.parse() decodes the auth
+// component but tolerates malformed percent sequences, so mirror that.
+function safeDecode(str) {
+    try {
+        return decodeURIComponent(str);
+    } catch (_err) {
+        return str;
+    }
+}
+
+// Derives the legacy-shaped bare hostname from a WHATWG URL. WHATWG keeps IPv6
+// literals bracketed ('[::1]') and, for non-special schemes (smtp:/smtps:/socks:),
+// percent-encodes a non-ASCII host instead of IDNA-mapping it. Both forms are
+// un-resolvable when handed to net/dns/http.request — which is what every call
+// site does — so map them back to what legacy url.parse() returned: the bare
+// address and the punycode form. Idempotent on plain ASCII and already-punycode
+// hosts, so special-scheme hosts (already IDNA-mapped by WHATWG) pass through.
+function normalizeHostname(raw) {
+    let hostname = raw || '';
+    if (!hostname) {
+        // Host-less URL (e.g. 'direct:'): legacy returned '' here, not null;
+        // consumers do `hostname.length` / `'.' + hostname`, so keep it a string.
+        return '';
+    }
+    if (hostname.charAt(0) === '[' && hostname.charAt(hostname.length - 1) === ']') {
+        return hostname.slice(1, -1);
+    }
+    return punycode.toASCII(safeDecode(hostname));
+}
+
+module.exports.parse = (input, parseQueryString) => {
+    input = input || '';
+
+    if (!URLImpl) {
+        // Node < 6.13: no WHATWG URL available, use the legacy parser.
+        return urllib.parse(input, parseQueryString);
+    }
+
+    // Legacy url.parse() parses a "user:pass@host:port" authority that follows
+    // the scheme even without the "//" separator, for schemes outside its
+    // built-in slashed-protocol list (smtp:/smtps:/socks:/...). The WHATWG
+    // parser instead treats a scheme not followed by "//" as an opaque path.
+    // Re-insert the "//" so slash-less connection/proxy URLs keep resolving to
+    // an authority, as they did before. This assumes a slash-authority scheme,
+    // which every consumer here uses (http/https/smtp/smtps/socks/direct); an
+    // opaque scheme like mailto:/data:/tel: would be mis-split, but none reach
+    // this module.
+    const slashless = SLASHLESS_AUTHORITY.exec(input);
+    const normalized = slashless ? slashless[1] + '//' + slashless[2] : input;
+
+    let u;
+    try {
+        u = new URLImpl(normalized);
+    } catch (_err) {
+        // WHATWG rejects some input the legacy parser tolerated (empty/relative
+        // strings, scheme-relative '//host/path', out-of-range ports, ...). Fall
+        // back to the legacy parser so behavior — including the downstream errors
+        // callers rely on — is preserved. This is the only path that can still
+        // emit a deprecation warning; it fires for anything WHATWG cannot
+        // represent, including legitimate relative URLs, not just malformed input.
+        return urllib.parse(input, parseQueryString);
+    }
+
+    const hostname = normalizeHostname(u.hostname);
+    const port = u.port || null;
+    const pathname = u.pathname || null;
+    const search = u.search || null;
+
+    // Legacy `.auth` is the decoded "user[:pass]" string; WHATWG keeps the
+    // username/password percent-encoded, so decode to stay byte-compatible with
+    // existing consumers (parseConnectionUrl, Basic/Proxy-Authorization headers).
+    let auth = null;
+    if (u.username || u.password) {
+        // Gate on password too: legacy url.parse('smtps://:pass@host').auth was
+        // ':pass'. Dropping it would silently connect unauthenticated.
+        auth = safeDecode(u.username) + (u.password ? ':' + safeDecode(u.password) : '');
+    }
+
+    let query;
+    if (parseQueryString) {
+        // Mirror querystring.parse(): null-prototype object, repeated keys → array.
+        query = Object.create(null);
+        u.searchParams.forEach((value, key) => {
+            if (Object.prototype.hasOwnProperty.call(query, key)) {
+                if (Array.isArray(query[key])) {
+                    query[key].push(value);
+                } else {
+                    query[key] = [query[key], value];
+                }
+            } else {
+                query[key] = value;
+            }
+        });
+    } else {
+        query = search ? search.slice(1) : null;
+    }
+
+    return {
+        protocol: u.protocol || null,
+        host: u.host || null,
+        hostname,
+        port,
+        pathname,
+        search,
+        path: (pathname || '') + (search || '') || null,
+        href: u.href,
+        auth,
+        query
+    };
+};
+
+module.exports.resolve = (from, to) => {
+    if (!URLImpl) {
+        return urllib.resolve(from, to);
+    }
+    try {
+        return new URLImpl(to, from).href;
+    } catch (_err) {
+        // Malformed target — fall back to the legacy resolver.
+        return urllib.resolve(from, to);
+    }
+};
+
+
+/***/ }),
+
 /***/ 627:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
@@ -9741,7 +9998,7 @@ module.exports = DataStream;
 
 const net = __nccwpck_require__(9278);
 const tls = __nccwpck_require__(4756);
-const urllib = __nccwpck_require__(7016);
+const urllib = __nccwpck_require__(3101);
 const errors = __nccwpck_require__(7633);
 
 /**
@@ -9754,20 +10011,29 @@ const errors = __nccwpck_require__(7633);
  * @param {String} proxyUrl proxy configuration, etg "http://proxy.host:3128/"
  * @param {Number} destinationPort Port to open in destination host
  * @param {String} destinationHost Destination hostname
+ * @param {Object} [tlsOptions] Optional TLS options for an HTTPS proxy (e.g. { rejectUnauthorized: false })
  * @param {Function} callback Callback to run with the rocket object once connection is established
  */
-function httpProxyClient(proxyUrl, destinationPort, destinationHost, callback) {
+function httpProxyClient(proxyUrl, destinationPort, destinationHost, tlsOptions, callback) {
+    if (typeof tlsOptions === 'function') {
+        callback = tlsOptions;
+        tlsOptions = {};
+    }
+    tlsOptions = tlsOptions || {};
+
     const proxy = urllib.parse(proxyUrl);
 
-    const options = {
+    const connectOptions = {
         host: proxy.hostname,
         port: Number(proxy.port) ? Number(proxy.port) : proxy.protocol === 'https:' ? 443 : 80
     };
 
     let connect;
     if (proxy.protocol === 'https:') {
-        // we can use untrusted proxies as long as we verify actual SMTP certificates
-        options.rejectUnauthorized = false;
+        // Validate the proxy's TLS certificate by default. A caller that uses a
+        // self-signed proxy (e.g. integration tests) opts out explicitly with
+        // tls.rejectUnauthorized === false.
+        connectOptions.rejectUnauthorized = tlsOptions.rejectUnauthorized !== false;
         connect = tls.connect.bind(tls);
     } else {
         connect = net.connect.bind(net);
@@ -9797,7 +10063,7 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, callback) {
         tempSocketErr(err);
     };
 
-    socket = connect(options, () => {
+    socket = connect(connectOptions, () => {
         if (finished) {
             return;
         }
@@ -9937,9 +10203,9 @@ function decodeServerResponse(str) {
  *  * **requireTLS** - forces the client to use STARTTLS
  *  * **name** - the name of the client server
  *  * **localAddress** - outbound address to bind to (see: http://nodejs.org/api/net.html#net_net_connect_options_connectionlistener)
- *  * **greetingTimeout** - Time to wait in ms until greeting message is received from the server (defaults to 10000)
- *  * **connectionTimeout** - how many milliseconds to wait for the connection to establish
- *  * **socketTimeout** - Time of inactivity until the connection is closed (defaults to 1 hour)
+ *  * **greetingTimeout** - Time to wait in ms until greeting message is received from the server (defaults to 30 seconds)
+ *  * **connectionTimeout** - how many milliseconds to wait for the connection to establish (defaults to 2 minutes)
+ *  * **socketTimeout** - Time of inactivity until the connection is closed (defaults to 10 minutes)
  *  * **dnsTimeout** - Time to wait in ms for the DNS requests to be resolved (defaults to 30 seconds)
  *  * **lmtp** - if true, uses LMTP instead of SMTP protocol
  *  * **logger** - bunyan compatible logger interface
@@ -10724,7 +10990,7 @@ class SMTPConnection extends EventEmitter {
             return;
         }
 
-        let data = (chunk || '').toString('binary');
+        let data = chunk.toString('binary');
         let lines = (this._remainder + data).split(/\r?\n/);
         let lastline;
 
@@ -12834,13 +13100,19 @@ class SMTPTransport extends EventEmitter {
 
     getAuth(authOpts) {
         if (!authOpts) {
+            if (this.auth && this.auth.oauth2 && this.mailer) {
+                // Transport-level auth is resolved in the constructor, before the Mail wrapper
+                // assigns `this.mailer`, so a provision callback registered with
+                // `transporter.set('oauth2_provision_cb', ...)` has to be re-checked here
+                this.auth.oauth2.provisionCallback = this.mailer.get('oauth2_provision_cb') || this.auth.oauth2.provisionCallback;
+            }
             return this.auth;
         }
 
         const authData = Object.assign(
             {},
             this.options.auth && typeof this.options.auth === 'object' ? this.options.auth : {},
-            authOpts && typeof authOpts === 'object' ? authOpts : {}
+            typeof authOpts === 'object' ? authOpts : {}
         );
 
         if (Object.keys(authData).length === 0) {
@@ -13195,6 +13467,8 @@ module.exports = SMTPTransport;
 
 const packageData = __nccwpck_require__(6710);
 const shared = __nccwpck_require__(1284);
+const LeWindows = __nccwpck_require__(7793);
+const LeUnix = __nccwpck_require__(348);
 
 /**
  * Generates a Transport object for streaming
@@ -13256,6 +13530,13 @@ class StreamTransport {
 
             try {
                 stream = mail.message.createReadStream();
+                if (this.options.newline) {
+                    // apply the transport-level line ending transform; the message-level
+                    // `newline` option is handled by MimeNode in createReadStream()
+                    const sourceStream = stream;
+                    stream = sourceStream.pipe(this.winbreak ? new LeWindows() : new LeUnix());
+                    sourceStream.once('error', err => stream.emit('error', err));
+                }
             } catch (E) {
                 this.logger.error(
                     {
@@ -13767,12 +14048,11 @@ class XOAuth2 extends Stream {
             allowErrorResponse: true
         };
 
-        // OAuth2 token endpoints are credential-bearing. lib/fetch defaults to
-        // rejectUnauthorized:false (intentional for self-signed attachment
-        // hosts), so opt back in to strict cert validation here when the
-        // access URL is HTTPS. params.tls (the user's options.tls) is layered
-        // on top so callers with a self-hosted provider on a private CA can
-        // still override.
+        // OAuth2 token endpoints are credential-bearing. lib/fetch already
+        // validates certs by default; pin rejectUnauthorized:true here so the
+        // token fetch stays strict, while still layering params.tls (the
+        // user's options.tls) on top so callers with a self-hosted provider on
+        // a private CA can override.
         if (/^https:/i.test(url)) {
             fetchOptions.tls = Object.assign({ rejectUnauthorized: true }, params.tls || {});
         }
@@ -41893,7 +42173,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"126":{"description":"126 Mail (NetEa
 /***/ 6710:
 /***/ ((module) => {
 
-module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"8.0.10","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","test:coverage":"c8 node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","format":"prettier --write \\"**/*.{js,json,md}\\"","format:check":"prettier --check \\"**/*.{js,json,md}\\"","lint":"eslint .","lint:fix":"eslint . --fix","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install","test:syntax":"docker run --rm -v \\"$PWD:/app:ro\\" -w /app node:6-alpine node test/syntax-compat.js"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-sesv2":"3.1037.0","bunyan":"1.8.15","c8":"11.0.0","eslint":"10.2.1","eslint-config-prettier":"10.1.8","globals":"17.5.0","libbase64":"1.3.0","libmime":"5.3.8","libqp":"2.1.1","prettier":"3.8.3","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.18.4"},"engines":{"node":">=6.0.0"}}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"9.0.1","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","test:coverage":"c8 node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","format":"prettier --write \\"**/*.{js,json,md}\\"","format:check":"prettier --check \\"**/*.{js,json,md}\\"","lint":"eslint .","lint:fix":"eslint . --fix","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install","test:syntax":"docker run --rm -v \\"$PWD:/app:ro\\" -w /app node:6-alpine node test/syntax-compat.js"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-sesv2":"3.1068.0","bunyan":"1.8.15","c8":"11.0.0","eslint":"10.5.0","eslint-config-prettier":"10.1.8","globals":"17.6.0","libbase64":"1.3.0","libmime":"5.3.8","libqp":"2.1.1","prettier":"3.8.4","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.19.0"},"engines":{"node":">=6.0.0"}}');
 
 /***/ })
 
