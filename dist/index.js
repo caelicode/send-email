@@ -187,6 +187,7 @@ class Tokenizer {
         this.operatorExpecting = '';
         this.node = null;
         this.escaped = false;
+        this.inDomainLiteral = false;
 
         this.list = [];
         /**
@@ -238,6 +239,21 @@ class Tokenizer {
      * @param {String} chr Character from the address field
      */
     checkChar(chr, nextChr) {
+        // Track RFC 5322 domain-literals ("[" *dtext "]"). Operator characters such
+        // as the ":" of an IPv6 address-literal (user@[IPv6:2001:db8::1]) are dtext
+        // and must not be treated as the group delimiter while inside the brackets.
+        // Quoted strings and comments are handled separately via operatorExpecting,
+        // so only enter this state when no operator is open. The list separators ","
+        // and ";" are the exception: they always end the literal (and split the
+        // address list) so that an unclosed "[" cannot swallow later recipients.
+        if (!this.escaped && !this.operatorExpecting) {
+            if (!this.inDomainLiteral && chr === '[') {
+                this.inDomainLiteral = true;
+            } else if (this.inDomainLiteral && (chr === ']' || chr === ',' || chr === ';')) {
+                this.inDomainLiteral = false;
+            }
+        }
+
         if (this.escaped) {
             // ignore next condition blocks
         } else if (chr === this.operatorExpecting) {
@@ -256,7 +272,7 @@ class Tokenizer {
             this.escaped = false;
 
             return;
-        } else if (!this.operatorExpecting && chr in this.operators) {
+        } else if (!this.operatorExpecting && !this.inDomainLiteral && chr in this.operators) {
             this.node = {
                 type: 'operator',
                 value: chr
@@ -964,7 +980,7 @@ class RelaxedBody extends Transform {
         options = options || {};
         this.chunkBuffer = [];
         this.chunkBufferLen = 0;
-        this.bodyHash = crypto.createHash(options.hashAlgo || 'sha1');
+        this.bodyHash = crypto.createHash(options.hashAlgo || 'sha256');
         this.remainder = '';
         this.byteLength = 0;
 
@@ -8785,11 +8801,12 @@ class SESTransport extends EventEmitter {
 
     getRegion(cb) {
         if (this.ses.sesClient.config && typeof this.ses.sesClient.config.region === 'function') {
-            // promise
-            return this.ses.sesClient.config
-                .region()
-                .then(region => cb(null, region))
-                .catch(err => cb(err));
+            // Resolve the region provider. Use the two-argument form of then() so that a
+            // synchronous throw from cb is not recaught here and used to invoke cb a second time.
+            return this.ses.sesClient.config.region().then(
+                region => cb(null, region),
+                err => cb(err)
+            );
         }
         return cb(null, false);
     }
@@ -8892,8 +8909,27 @@ class SESTransport extends EventEmitter {
                         region = 'us-east-1';
                     }
 
-                    const command = new this.ses.SendEmailCommand(sesMessage);
-                    const sendPromise = this.ses.sesClient.send(command);
+                    let sendPromise;
+                    try {
+                        // command construction or dispatch can throw synchronously on a
+                        // misconfigured SDK; surface it as a single error callback instead
+                        // of letting it escape into getRegion's promise chain
+                        const command = new this.ses.SendEmailCommand(sesMessage);
+                        sendPromise = this.ses.sesClient.send(command);
+                    } catch (err) {
+                        tagSesError(err);
+                        this.logger.error(
+                            {
+                                err,
+                                tnx: 'send'
+                            },
+                            'Send error for %s: %s',
+                            messageId,
+                            err.message
+                        );
+                        setImmediate(() => callback(err));
+                        return;
+                    }
 
                     sendPromise
                         .then(data => {
@@ -8901,7 +8937,7 @@ class SESTransport extends EventEmitter {
                                 region = 'email';
                             }
 
-                            callback(null, {
+                            const info = {
                                 envelope: {
                                     from: envelope.from,
                                     to: envelope.to
@@ -8909,7 +8945,11 @@ class SESTransport extends EventEmitter {
                                 messageId: '<' + data.MessageId + (!/@/.test(data.MessageId) ? '@' + region + '.amazonses.com' : '') + '>',
                                 response: data.MessageId,
                                 raw
-                            });
+                            };
+
+                            // invoke the callback outside the promise chain so a throw from it
+                            // is not recaught by .catch() and used to call it a second time
+                            setImmediate(() => callback(null, info));
                         })
                         .catch(err => {
                             tagSesError(err);
@@ -8922,7 +8962,7 @@ class SESTransport extends EventEmitter {
                                 messageId,
                                 err.message
                             );
-                            callback(err);
+                            setImmediate(() => callback(err));
                         });
                 });
             })
@@ -8964,10 +9004,16 @@ class SESTransport extends EventEmitter {
         // the region value is not used for anything when verifying, but the lookup
         // exercises the client configuration the same way as send() does
         this.getRegion(() => {
-            const command = new this.ses.SendEmailCommand(sesMessage);
-            const sendPromise = this.ses.sesClient.send(command);
+            let sendPromise;
+            try {
+                const command = new this.ses.SendEmailCommand(sesMessage);
+                sendPromise = this.ses.sesClient.send(command);
+            } catch (err) {
+                setImmediate(() => cb(err));
+                return;
+            }
 
-            sendPromise.then(() => cb(null)).catch(err => cb(err));
+            sendPromise.then(() => setImmediate(() => cb(null))).catch(err => setImmediate(() => cb(err)));
         });
 
         return promise;
@@ -10001,6 +10047,10 @@ const tls = __nccwpck_require__(4756);
 const urllib = __nccwpck_require__(3101);
 const errors = __nccwpck_require__(7633);
 
+// Cap the CONNECT response we buffer before the header terminator, so a proxy that
+// never sends \r\n\r\n cannot grow memory unboundedly before the socket times out.
+const MAX_RESPONSE_HEADER_BYTES = 64 * 1024;
+
 /**
  * Establishes proxied connection to destinationPort
  *
@@ -10020,6 +10070,16 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, tlsOptions,
         tlsOptions = {};
     }
     tlsOptions = tlsOptions || {};
+
+    // Reject CRLF in the destination before it reaches the CONNECT request line
+    // and Host header. A tainted host/port could otherwise inject additional
+    // request headers into the proxy connection (HTTP request splitting).
+    destinationPort = Number(destinationPort) || 0;
+    if (!destinationPort || /[\r\n]/.test(destinationHost)) {
+        const err = new Error('Invalid proxy destination');
+        err.code = errors.EPROXY;
+        return setImmediate(() => callback(err));
+    }
 
     const proxy = urllib.parse(proxyUrl);
 
@@ -10131,6 +10191,13 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, tlsOptions,
                 socket.setTimeout(0);
 
                 return callback(null, socket);
+            }
+
+            if (headers.length > MAX_RESPONSE_HEADER_BYTES) {
+                socket.removeListener('data', onSocketData);
+                const err = new Error('Proxy response headers too large');
+                err.code = errors.EPROXY;
+                return tempSocketErr(err);
             }
         };
         socket.on('data', onSocketData);
@@ -10450,6 +10517,20 @@ class SMTPConnection extends EventEmitter {
                 try {
                     this._socket.connect(this.port, this.host, () => {
                         this._socket.setKeepAlive(true);
+
+                        // a `secure` connection over a caller-provided socket must still
+                        // perform the TLS handshake, otherwise AUTH and the message body
+                        // would be sent in cleartext despite the caller requesting TLS
+                        if (this.secureConnection && !this.alreadySecured) {
+                            return this._upgradeConnection(err => {
+                                if (err) {
+                                    this._onError(new Error('Error initiating TLS - ' + (err.message || err)), 'ETLS', false, 'CONN');
+                                    return;
+                                }
+                                this._onConnect();
+                            });
+                        }
+
                         this._onConnect();
                     });
                     this._setupConnectionHandlers();
@@ -10517,6 +10598,14 @@ class SMTPConnection extends EventEmitter {
      * @param {Boolean} secure Whether to use TLS
      */
     _connectToHost(opts, secure) {
+        // If the client was closed while DNS resolution was in flight, do not open
+        // a socket here: close() ran with this._socket still unset and so had
+        // nothing to tear down, and _onConnect's remedial close() is a no-op once
+        // _closing is set — the freshly connected socket would leak.
+        if (this._destroyed || this._closing) {
+            return;
+        }
+
         this._connectionAttemptId++;
         const currentAttemptId = this._connectionAttemptId;
 
@@ -10583,6 +10672,9 @@ class SMTPConnection extends EventEmitter {
         if (this._socket) {
             try {
                 this._socket.removeListener('error', this._onConnectionSocketError);
+                // Absorb any late teardown error (e.g. a TLS fallback socket emitting
+                // after destroy), mirroring the guard used in close()
+                this._socket.on('error', TEARDOWN_NOOP);
                 this._socket.destroy();
             } catch (_E) {
                 // ignore
@@ -10909,6 +11001,11 @@ class SMTPConnection extends EventEmitter {
      * @param {Function} callback Callback to return once connection is reset
      */
     reset(callback) {
+        const isDestroyedMessage = this._isDestroyedMessage('reset');
+        if (isDestroyedMessage) {
+            return callback(this._formatError(isDestroyedMessage, 'ECONNECTION', false, 'API'));
+        }
+
         this._sendCommand('RSET');
         this._responseActions.push(str => {
             if (str.charAt(0) !== '2') {
@@ -10957,6 +11054,9 @@ class SMTPConnection extends EventEmitter {
         this._socket.removeListener('end', this._onSocketEnd);
         // Switch from connection-phase error handler to normal error handler
         this._socket.removeListener('error', this._onConnectionSocketError);
+        // _upgradeConnection (options.connection + secure) may already have attached
+        // the normal handler; remove it first so we never end up with a duplicate
+        this._socket.removeListener('error', this._onSocketError);
 
         this._socket.on('error', this._onSocketError);
         this._socket.on('data', this._onSocketData);
@@ -11146,6 +11246,8 @@ class SMTPConnection extends EventEmitter {
             return;
         }
         this._destroyed = true;
+        // keep the documented public flag in sync with the private state
+        this.destroyed = true;
         this.emit('end');
     }
 
@@ -11156,6 +11258,15 @@ class SMTPConnection extends EventEmitter {
      *        has been secured
      */
     _upgradeConnection(callback) {
+        // RFC 3207 section 6: the client MUST discard any knowledge obtained from
+        // the server that was not received over the TLS-protected session. Drop any
+        // buffered input received before the handshake so a man-in-the-middle cannot
+        // inject plaintext bytes after the "220" reply (e.g. a CRLF-free fragment that
+        // would otherwise be prepended to the first post-TLS response and parsed as
+        // part of the secured EHLO capabilities). STARTTLS response injection.
+        this._remainder = '';
+        this._responseQueue = [];
+
         // do not remove all listeners or it breaks node v0.10 as there's
         // apparently a 'finish' event set that would be cleared as well
 
@@ -11184,6 +11295,9 @@ class SMTPConnection extends EventEmitter {
             socketPlain.removeListener('close', this._onSocketClose);
             socketPlain.removeListener('end', this._onSocketEnd);
             socketPlain.removeListener('error', this._onSocketError);
+            // the connection-phase handler is attached when upgrading a pre-opened
+            // options.connection socket; strip it so nothing lingers on the plain socket
+            socketPlain.removeListener('error', this._onConnectionSocketError);
         };
 
         this.upgrading = true;
@@ -11216,18 +11330,27 @@ class SMTPConnection extends EventEmitter {
 
     /**
      * Processes queued responses from the server
-     *
-     * @param {Boolean} force If true, ignores _processing flag
      */
     _processResponse() {
         if (!this._responseQueue.length) {
             return false;
         }
 
-        let str = (this.lastServerResponse = decodeServerResponse((this._responseQueue.shift() || '').toString()));
+        const raw = (this._responseQueue.shift() || '').toString();
+
+        // Skip unexpected empty lines without consuming a response action or
+        // overwriting lastServerResponse; reprocess whatever else is queued.
+        if (!raw.trim()) {
+            setImmediate(() => this._processResponse());
+            return;
+        }
+
+        let str = (this.lastServerResponse = decodeServerResponse(raw));
 
         if (/^\d+-/.test(str.split('\n').pop())) {
-            // keep waiting for the final part of multiline response
+            // last line is still a continuation: put the partial response back on the
+            // queue and wait for the rest rather than dropping it
+            this._responseQueue.unshift(raw);
             return;
         }
 
@@ -11238,11 +11361,6 @@ class SMTPConnection extends EventEmitter {
                 },
                 str.replace(/\r?\n$/, '')
             );
-        }
-
-        if (!str.trim()) {
-            // skip unexpected empty lines
-            setImmediate(() => this._processResponse());
         }
 
         const action = this._responseActions.shift();
@@ -11341,6 +11459,23 @@ class SMTPConnection extends EventEmitter {
             }
         }
 
+        // RFC 8689: validate REQUIRETLS eligibility before queuing the MAIL FROM
+        // response action, so a rejection here cannot leave an orphaned action in
+        // _responseActions (which would consume the next reply and desync a reused
+        // connection).
+        if (this._envelope.requireTLSExtensionEnabled) {
+            if (!this.secure) {
+                return callback(
+                    this._formatError('REQUIRETLS can only be used over TLS connections (RFC 8689)', 'EREQUIRETLS', false, 'MAIL FROM')
+                );
+            }
+            if (!this._supportedExtensions.includes('REQUIRETLS')) {
+                return callback(
+                    this._formatError('Server does not support REQUIRETLS extension (RFC 8689)', 'EREQUIRETLS', false, 'MAIL FROM')
+                );
+            }
+        }
+
         this._responseActions.push(str => {
             this._actionMAIL(str, callback);
         });
@@ -11377,20 +11512,10 @@ class SMTPConnection extends EventEmitter {
             }
         }
 
-        // RFC 8689: If the envelope requests REQUIRETLS extension
-        // then append REQUIRETLS keyword to the MAIL FROM command
-        // Note: REQUIRETLS can only be used over TLS connections and requires server support
+        // RFC 8689: append the REQUIRETLS keyword to MAIL FROM. Eligibility
+        // (TLS connection + server support) was already validated above, before
+        // the response action was queued.
         if (this._envelope.requireTLSExtensionEnabled) {
-            if (!this.secure) {
-                return callback(
-                    this._formatError('REQUIRETLS can only be used over TLS connections (RFC 8689)', 'EREQUIRETLS', false, 'MAIL FROM')
-                );
-            }
-            if (!this._supportedExtensions.includes('REQUIRETLS')) {
-                return callback(
-                    this._formatError('Server does not support REQUIRETLS extension (RFC 8689)', 'EREQUIRETLS', false, 'MAIL FROM')
-                );
-            }
             args.push('REQUIRETLS');
         }
 
@@ -42264,7 +42389,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"126":{"description":"126 Mail (NetEa
 /***/ 6710:
 /***/ ((module) => {
 
-module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"9.0.1","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","test:coverage":"c8 node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","format":"prettier --write \\"**/*.{js,json,md}\\"","format:check":"prettier --check \\"**/*.{js,json,md}\\"","lint":"eslint .","lint:fix":"eslint . --fix","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install","test:syntax":"docker run --rm -v \\"$PWD:/app:ro\\" -w /app node:6-alpine node test/syntax-compat.js"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-sesv2":"3.1068.0","bunyan":"1.8.15","c8":"11.0.0","eslint":"10.5.0","eslint-config-prettier":"10.1.8","globals":"17.6.0","libbase64":"1.3.0","libmime":"5.3.8","libqp":"2.1.1","prettier":"3.8.4","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.19.0"},"engines":{"node":">=6.0.0"}}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"9.0.3","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","test:coverage":"c8 node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","format":"prettier --write \\"**/*.{js,json,md}\\"","format:check":"prettier --check \\"**/*.{js,json,md}\\"","lint":"eslint .","lint:fix":"eslint . --fix","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install","test:syntax":"docker run --rm -v \\"$PWD:/app:ro\\" -w /app node:6-alpine node test/syntax-compat.js"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-sesv2":"3.1068.0","bunyan":"1.8.15","c8":"11.0.0","eslint":"10.5.0","eslint-config-prettier":"10.1.8","globals":"17.6.0","libbase64":"1.3.0","libmime":"5.3.8","libqp":"2.1.1","prettier":"3.8.4","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.19.0"},"engines":{"node":">=6.0.0"}}');
 
 /***/ })
 
