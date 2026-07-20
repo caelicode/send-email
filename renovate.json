@@ -1,0 +1,11 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "packageRules": [
+    {
+      "description": "undici 8.x requires Node 22+, but this action still runs on node20.",
+      "matchPackageNames": ["undici"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    }
+  ]
+}
