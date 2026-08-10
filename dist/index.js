@@ -7,6 +7,40 @@ import { createRequire as __WEBPACK_EXTERNAL_createRequire } from "module";
 
 
 /**
+ * Restores the quoting of a local part that was read out of a quoted string.
+ *
+ * RFC 5321 allows '@' inside a quoted local part, so handing '"user@evil.com"@good.com'
+ * on as the bare 'user@evil.com@good.com' leaves it to the consumer which '@' splits the
+ * domain off. Getting that wrong is a misrouting vector, so the quotes go back on. The
+ * same holds for the other specials: a ',' or a ';' that loses its quotes reads as a
+ * recipient separator once the consumer puts the address back into a header.
+ *
+ * This module has no dependencies so that it can ship on its own, which is why the two
+ * grammar tests below are spelled out here instead of shared with lib/mime-node. Keeping
+ * only what is ambiguous quoted is deliberate, mime-node applies the stricter RFC 5321
+ * dot-atom rule on top of this when it emits an address.
+ *
+ * @param {String} address Address with an unquoted local part
+ * @return {String} Address with the local part as a quoted-string
+ */
+function _quoteLocalPart(address) {
+    const lastAt = address.lastIndexOf('@');
+    if (lastAt < 0) {
+        // no domain to split off, nothing can be misrouted
+        return address;
+    }
+
+    const user = address.substr(0, lastAt);
+    if (/^[^\s"(),:;<>@[\\\]]+$/.test(user) || /^"(?:[^"\\]|\\[\s\S])*"$/.test(user)) {
+        // a local part that carries no special reads the same with or without the quotes,
+        // and one that is already a complete quoted-string needs nothing either
+        return address;
+    }
+
+    return '"' + user.replace(/["\\]/g, '\\$&') + '"@' + address.substr(lastAt + 1);
+}
+
+/**
  * Converts tokens for a single address into an address object
  *
  * @param {Array} tokens Tokens object
@@ -151,6 +185,10 @@ function _handleAddress(tokens, depth) {
             data.text = data.text.concat(data.address.splice(1));
         }
 
+        // An address is only taken from unquoted text, so anything left in the text at this
+        // point that still has to serve as the address carries its quoting in this flag
+        const addressFromQuotedText = !data.address.length && data.textWasQuoted.some(wasQuoted => wasQuoted);
+
         // Join values with spaces
         data.text = data.text.join(' ');
         data.address = data.address.join(' ');
@@ -166,6 +204,10 @@ function _handleAddress(tokens, depth) {
             } else {
                 address.address = '';
             }
+        }
+
+        if (addressFromQuotedText && address.address) {
+            address.address = _quoteLocalPart(address.address);
         }
 
         addresses.push(address);
@@ -1180,15 +1222,20 @@ module.exports = (headers, hashAlgo, bodyHash, options) => {
 module.exports.relaxedHeaders = relaxedHeaders;
 
 function generateDKIMHeader(domainName, keySelector, fieldNames, hashAlgo, bodyHash) {
+    // the caller supplied tag values are interpolated straight into the tag list, and none of
+    // them has any way to carry a control char, DEL, or one of the delimiters that would close
+    // the value and open a tag of its own
+    const cleanTagValue = value => (value || '').toString().replace(/[\x00-\x1f\x7f;=]/g, '');
+
     const dkim = [
         'v=1',
         'a=rsa-' + hashAlgo,
         'c=relaxed/relaxed',
-        'd=' + punycode.toASCII(domainName),
+        'd=' + punycode.toASCII(cleanTagValue(domainName)),
         'q=dns/txt',
-        's=' + keySelector,
+        's=' + cleanTagValue(keySelector),
         'bh=' + bodyHash,
-        'h=' + fieldNames
+        'h=' + cleanTagValue(fieldNames)
     ].join('; ');
 
     return mimeFuncs.foldLines('DKIM-Signature: ' + dkim, 76) + ';\r\n b=';
@@ -1942,7 +1989,7 @@ class JSONTransport {
         // Sendmail strips this header line by itself
         mail.message.keepBcc = true;
 
-        const envelope = mail.data.envelope || mail.message.getEnvelope();
+        const envelope = mail.message.getEnvelope();
         const messageId = mail.message.messageId();
 
         const recipients = [].concat(envelope.to || []);
@@ -3243,7 +3290,7 @@ class MailMessage {
     }
 
     normalize(callback) {
-        const envelope = this.data.envelope || this.message.getEnvelope();
+        const envelope = this.message.getEnvelope();
         const messageId = this.message.messageId();
 
         this.resolveAll((err, data) => {
@@ -3374,15 +3421,16 @@ class MailMessage {
                         }
 
                         if (value && value.url) {
+                            // strip CR/LF so a comment can't inject extra header lines. DEL is neither
+                            // qtext nor ctext, so it can not be carried literally by either construct
+                            // and has to become an encoded word like any other non-plaintext value
+                            let comment = (value.comment || '').toString().replace(/\r?\n|\r/g, ' ');
+                            const needsEncoding = !mimeFuncs.isPlainText(comment) || /\x7f/.test(comment);
+
                             if (key.toLowerCase().trim() === 'id') {
-                                // List-ID: "comment" <domain>
-                                // strip CR/LF so a comment can't inject extra header lines
-                                let comment = (value.comment || '').toString().replace(/\r?\n|\r/g, ' ');
-                                if (mimeFuncs.isPlainText(comment)) {
-                                    comment = '"' + comment + '"';
-                                } else {
-                                    comment = mimeFuncs.encodeWord(comment);
-                                }
+                                // List-ID: "comment" <domain>, where an unescaped quote or a trailing
+                                // backslash in the comment would swallow the <domain> behind it
+                                comment = needsEncoding ? mimeFuncs.encodeWord(comment) : mimeFuncs.quoteString(comment);
 
                                 // List-ID expects a bare domain-like identifier, so strip the
                                 // scheme prefix that _formatListUrl adds or passes through
@@ -3392,11 +3440,11 @@ class MailMessage {
                             }
 
                             // List-*: <http://domain> (comment)
-                            // strip CR/LF so a comment can't inject extra header lines
-                            let comment = (value.comment || '').toString().replace(/\r?\n|\r/g, ' ');
-                            if (!mimeFuncs.isPlainText(comment)) {
-                                comment = mimeFuncs.encodeWord(comment);
-                            }
+                            // the ctext specials go out as quoted-pairs, otherwise a ")" closes the
+                            // comment early and leaves the rest as junk, an unpaired "(" opens a
+                            // nested comment that never closes, and a trailing backslash escapes
+                            // the closing ")" so the comment swallows whatever follows it
+                            comment = needsEncoding ? mimeFuncs.encodeWord(comment) : comment.replace(/[()\\]/g, '\\$&');
 
                             return this._formatListUrl(value.url) + (value.comment ? ' (' + comment + ')' : '');
                         }
@@ -3410,7 +3458,9 @@ class MailMessage {
     }
 
     _formatListUrl(url) {
-        url = url.replace(/[\s<]+|[\s>]+/g, '');
+        // a url has no way to carry a control char or DEL, and the angle brackets around it
+        // are not a quoting construct, so anything left here lands in the header raw
+        url = url.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').replace(/[\s<]+|[\s>]+/g, '');
         if (/^(https?|mailto|ftp):/.test(url)) {
             return '<' + url + '>';
         }
@@ -3442,12 +3492,31 @@ module.exports = {
     /**
      * Checks if a value is plaintext string (uses only printable 7bit chars)
      *
+     * When isParam is set the value is destined for a header parameter, so HT, CR and LF
+     * are not plaintext either: a header parameter has no way to carry them. HT is a valid
+     * fold point, so folding and unfolding a header would rewrite it as a space, and CR/LF
+     * cannot appear in a header value at all. DEL is neither a token character nor qtext,
+     * so it can not be carried bare or quoted. Such values have to go through the rfc2231
+     * parameter continuation encoding instead, the same way a quote already does.
+     *
      * @param {String} value String to be tested
+     * @param {Boolean} [isParam] Set to true if the value is a header parameter value
      * @returns {Boolean} true if it is a plaintext string
      */
     isPlainText(value, isParam) {
-        const re = isParam ? /[\x00-\x08\x0b\x0c\x0e-\x1f"\u0080-\uFFFF]/ : /[\x00-\x08\x0b\x0c\x0e-\x1f\u0080-\uFFFF]/;
+        const re = isParam ? /[\x00-\x1f\x7f"\u0080-\uFFFF]/ : /[\x00-\x08\x0b\x0c\x0e-\x1f\u0080-\uFFFF]/;
         return typeof value === 'string' && !re.test(value);
+    },
+
+    /**
+     * Wraps a value into a quoted-string. Inside one a quote would end the string early
+     * and a backslash would escape whatever follows it, so both go out as quoted-pairs.
+     *
+     * @param {String} value String to be quoted
+     * @returns {String} The value as a quoted-string, quotes included
+     */
+    quoteString(value) {
+        return '"' + (value || '').toString().replace(/["\\]/g, '\\$&') + '"';
     },
 
     /**
@@ -3512,8 +3581,10 @@ module.exports = {
                 for (let i = 0, len = encodedStr.length; i < len; i++) {
                     let chr = encodedStr.charAt(i);
 
-                    if (/[\ud83c\ud83d\ud83e]/.test(chr) && i < len - 1) {
-                        // composite emoji byte, so add the next byte as well
+                    if (/[\ud800-\udbff]/.test(chr) && /[\udc00-\udfff]/.test(encodedStr.charAt(i + 1))) {
+                        // leading surrogate, so add the trailing surrogate as well
+                        // an unpaired one must not swallow the next unit, that would destroy
+                        // a valid pair following it
                         chr += encodedStr.charAt(++i);
                     }
 
@@ -3600,10 +3671,12 @@ module.exports = {
     buildHeaderValue(structured) {
         const paramsArray = [];
 
-        Object.keys(structured.params || {}).forEach(param => {
+        Object.keys(structured.params || {}).forEach(key => {
             // filename might include unicode characters so it is a special case
             // other values probably do not
-            const value = structured.params[param];
+            const value = structured.params[key];
+            // a parameter name is a token too and it is emitted without any quoting around it
+            const param = key.replace(/[\x00-\x1f\x7f]/g, '');
             if (!this.isPlainText(value, true) || value.length >= 75) {
                 this.buildHeaderParam(param, value, 50).forEach(encodedParam => {
                     if (!/[\s"\\;:/=(),<>@[\]?]|^[-']|'$/.test(encodedParam.value) || encodedParam.key.substr(-1) === '*') {
@@ -3619,7 +3692,11 @@ module.exports = {
             }
         });
 
-        return structured.value + (paramsArray.length ? '; ' + paramsArray.join('; ') : '');
+        // the value ahead of the parameters is a token, it has no way to carry a control
+        // char or DEL and there is no quoting construct around it to escape one into
+        const value = typeof structured.value === 'string' ? structured.value.replace(/[\x00-\x1f\x7f]/g, '') : structured.value;
+
+        return value + (paramsArray.length ? '; ' + paramsArray.join('; ') : '');
     },
 
     /**
@@ -3640,7 +3717,7 @@ module.exports = {
     buildHeaderParam(key, data, maxLength) {
         const list = [];
         let encodedStr = typeof data === 'string' ? data : (data || '').toString();
-        let chr, ord;
+        let chr;
         let line;
         let startPos = 0;
         let i, len;
@@ -3677,8 +3754,9 @@ module.exports = {
                 const encodedStrArr = [];
                 for (i = 0, len = encodedStr.length; i < len; i++) {
                     chr = encodedStr.charAt(i);
-                    ord = chr.charCodeAt(0);
-                    if (ord >= 0xd800 && ord <= 0xdbff && i < len - 1) {
+                    if (/[\ud800-\udbff]/.test(chr) && /[\udc00-\udfff]/.test(encodedStr.charAt(i + 1))) {
+                        // an unpaired leading surrogate must not consume the next unit, that
+                        // would tear apart a valid pair following it
                         chr += encodedStr.charAt(i + 1);
                         encodedStrArr.push(chr);
                         i++;
@@ -3716,8 +3794,11 @@ module.exports = {
                                 line,
                                 encoded
                             });
+                            // the line we start here holds an encoded char, so it has to be
+                            // flagged as one. otherwise it gets an unstarred continuation key
+                            // and a receiver reads the percent escapes as literal text
                             line = '';
-                            startPos = i - 1;
+                            encoded = true;
                         } else {
                             encoded = true;
                             i = startPos;
@@ -4032,8 +4113,11 @@ module.exports = {
             // might throw if we try to encode invalid sequences, eg. partial emoji
             str = encodeURIComponent(str);
         } catch (_E) {
-            // should never run
-            return str.replace(/[^\x00-\x1F *'()<>@,;:\\"[\]?=\u007F-\uFFFF]+/g, '');
+            // an unpaired surrogate has no utf-8 representation, so run the value through a
+            // utf-8 roundtrip to get the same U+FFFD every other encoder here produces and
+            // retry. the value must never come back unencoded, it goes into a header parameter
+            // where a bare quote or semicolon would break it out into a parameter of its own
+            str = encodeURIComponent(Buffer.from(str, 'utf-8').toString('utf-8'));
         }
 
         // ensure chars that are not handled by encodeURICompent are converted as well
@@ -6186,6 +6270,20 @@ const LeUnix = __nccwpck_require__(348);
 
 const FORMATTED_HEADERS = ['From', 'Sender', 'To', 'Cc', 'Bcc', 'Reply-To', 'Date', 'References'];
 
+// RFC 5321 atext, plus the non-ascii bytes that SMTPUTF8 (RFC 6531) adds to it. A local part
+// built from these, with '.' as a separator, is a dot-atom and can be emitted bare
+const ATEXT = "[A-Za-z0-9!#$%&'*+\\-/=?^_`{|}~\\x80-\\uFFFF]";
+const DOT_ATOM = new RegExp('^' + ATEXT + '+(?:\\.' + ATEXT + '+)*$');
+
+// A complete quoted-string: everything between the outer quotes is either a plain char or
+// a quoted-pair. Anchored, so a value that only starts and ends with a quote does not pass
+const QUOTED_STRING = /^"(?:[^"\\]|\\[\s\S])*"$/;
+
+// An address that carries no special anywhere can be emitted bare in a header, everything
+// else goes into angle brackets so that the header can not be read as more addresses than
+// the envelope carries
+const PLAIN_ADDRESS = /^[^\s"(),:;<>@[\\\]]+@[^\s"(),:;<>@[\\\]]+$/;
+
 /**
  * Creates a new mime tree node. Assumes 'multipart/*' as the content type
  * if it is a branch, anything else counts as leaf. If rootNode is missing from
@@ -6717,6 +6815,11 @@ class MimeNode {
                 case 'Content-Type':
                     structured = mimeFuncs.parseHeaderValue(value);
 
+                    // the type token decides multipart and charset below, so clean it before
+                    // those run and not just on the way out, otherwise a control char makes
+                    // the checks miss and the header ends up claiming a type it is not set up for
+                    structured.value = (structured.value || '').toString().replace(/[\x00-\x1f\x7f]/g, '');
+
                     this._handleContentType(structured);
 
                     if (
@@ -6733,11 +6836,18 @@ class MimeNode {
                         // add support for non-compliant clients like QQ webmail
                         // we can't build the value with buildHeaderValue as the value is non standard and
                         // would be converted to parameter continuation encoding that we do not want
-                        param = this._encodeWords(this.filename);
+                        // control chars can not be quoted here: HT is a fold point that unfolding would
+                        // turn into a space, CR/LF can not appear in a header at all and DEL is not
+                        // qtext, so force the mime encoded word that a non-ascii filename would get anyway
+                        param = /[\x00-\x1f\x7f]/.test(this.filename)
+                            ? mimeFuncs.encodeWord(this.filename, this._getTextEncoding(this.filename), 52)
+                            : this._encodeWords(this.filename);
 
                         if (param !== this.filename || /[\s'"\\;:/=(),<>@[\]?]|^-/.test(param)) {
-                            // include value in quotes if needed
-                            param = '"' + param + '"';
+                            // include value in quotes if needed, escaping backslashes and quotes as
+                            // quoted-pairs exactly like buildHeaderValue does for filename=, otherwise
+                            // a trailing backslash would escape the closing quote
+                            param = JSON.stringify(param);
                         }
                         value += '; name=' + param;
                     }
@@ -6760,8 +6870,12 @@ class MimeNode {
 
             if (typeof this.normalizeHeaderKey === 'function') {
                 const normalized = this.normalizeHeaderKey(key, value);
-                if (normalized && typeof normalized === 'string' && normalized.length) {
-                    key = normalized;
+                // the result replaces the key on the way into the header, so it gets the same
+                // treatment the key it replaces already had. a line break here would end the
+                // header and start one of the caller's own
+                const cleaned = typeof normalized === 'string' ? normalized.replace(/[\x00-\x1f\x7f]/g, '') : '';
+                if (cleaned) {
+                    key = cleaned;
                 }
             }
 
@@ -7002,7 +7116,7 @@ class MimeNode {
 
         if (envelope.from) {
             list = [];
-            this._convertAddresses(this._parseAddresses(envelope.from), list);
+            this._convertAddresses(this._parseEnvelopeAddresses(envelope.from), list);
             list = list.filter(address => address && address.address);
             if (list.length && list[0]) {
                 this._envelope.from = list[0].address;
@@ -7010,7 +7124,7 @@ class MimeNode {
         }
         ['to', 'cc', 'bcc'].forEach(key => {
             if (envelope[key]) {
-                this._convertAddresses(this._parseAddresses(envelope[key]), this._envelope.to);
+                this._convertAddresses(this._parseEnvelopeAddresses(envelope[key]), this._envelope.to);
             }
         });
 
@@ -7199,13 +7313,65 @@ class MimeNode {
             [],
             [].concat(addresses).map(address => {
                 if (address && address.address) {
-                    address.address = this._normalizeAddress(address.address);
-                    address.name = address.name || '';
-                    return [address];
+                    const normalized = this._normalizeAddress(address.address);
+                    if (normalized === address.address && typeof address.name === 'string') {
+                        // there is nothing to rewrite, so there is nothing to keep off the original
+                        return [address];
+                    }
+
+                    // rewriting would land on the object the caller passed in and might
+                    // still hold a reference to, so rewrite a copy of it instead
+                    const copy = Object.assign({}, address);
+                    copy.address = normalized;
+                    copy.name = address.name || '';
+                    return [copy];
                 }
-                return addressparser(address);
+                return this._normalizeParsedAddresses(addressparser(address));
             })
         );
+    }
+
+    /**
+     * Normalizes the addresses of a freshly parsed address list, groups included.
+     *
+     * Everything this method returns carries a normalized address, whether it arrived as an
+     * object or was parsed out of a header value. Without this the two shapes disagree, and
+     * a consumer reading the parsed form back is handed the ambiguous
+     * 'user@evil.com@good.com' that the header and the envelope no longer carry.
+     *
+     * @param {Array} parsed An array of address objects, as returned by addressparser
+     * @return {Array} The same array, with every address normalized
+     */
+    _normalizeParsedAddresses(parsed) {
+        // addressparser builds these objects, so no caller holds a reference to rewrite around
+        parsed.forEach(entry => {
+            if (entry.address) {
+                entry.address = this._normalizeAddress(entry.address);
+            } else if (entry.group) {
+                this._normalizeParsedAddresses(entry.group);
+            }
+        });
+
+        return parsed;
+    }
+
+    /**
+     * Parses the addresses of an explicitly set envelope.
+     *
+     * An envelope value is an addr-spec and never a display name, so a bare local username
+     * such as 'root' is the address here. Header parsing has to read the same value as a
+     * display name, as a value with no '@' in it can not be an addr-spec in a header.
+     *
+     * @param {Mixed} addresses Addresses to be parsed
+     * @return {Array} An array of address objects
+     */
+    _parseEnvelopeAddresses(addresses) {
+        return this._parseAddresses(addresses).map(entry => {
+            if (entry.address || entry.group || !entry.name || /[\s@]/.test(entry.name)) {
+                return entry;
+            }
+            return { address: this._normalizeAddress(entry.name), name: '' };
+        });
     }
 
     /**
@@ -7219,6 +7385,9 @@ class MimeNode {
             .toString()
             // no newlines in keys
             .replace(/\r?\n|\r/g, ' ')
+            // a field name is printable ascii without the colon, so a control char or DEL
+            // can only be dropped, there is no quoting construct around a field name
+            .replace(/[\x00-\x1f\x7f]/g, '')
             .trim()
             .toLowerCase()
             // use uppercase words, except MIME
@@ -7279,7 +7448,13 @@ class MimeNode {
             case 'Message-ID':
             case 'In-Reply-To':
             case 'Content-Id':
-                value = (value || '').toString().replace(/\r?\n|\r/g, ' ');
+                // a msg-id is structured, so an encoded word inside the angle brackets would
+                // be read as literal text. drop the characters that can not appear in a header
+                // at all, but leave HT alone, it separates the ids of a multi id value
+                value = (value || '')
+                    .toString()
+                    .replace(/\r?\n|\r/g, ' ')
+                    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
 
                 if (value.charAt(0) !== '<') {
                     value = '<' + value;
@@ -7299,6 +7474,7 @@ class MimeNode {
                             elm = (elm || '')
                                 .toString()
                                 .replace(/\r?\n|\r/g, ' ')
+                                .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
                                 .trim();
                             return elm.replace(/<[^>]*>/g, str => str.replace(/\s/g, '')).split(/\s+/);
                         })
@@ -7321,7 +7497,7 @@ class MimeNode {
                 }
 
                 value = (value || '').toString().replace(/\r?\n|\r/g, ' ');
-                return this._encodeWords(value);
+                return this._encodeHeaderText(value);
 
             case 'Content-Type':
             case 'Content-Disposition':
@@ -7330,8 +7506,7 @@ class MimeNode {
 
             default:
                 value = (value || '').toString().replace(/\r?\n|\r/g, ' ');
-                // encodeWords only encodes if needed, otherwise the original string is returned
-                return this._encodeWords(value);
+                return this._encodeHeaderText(value);
         }
     }
 
@@ -7352,7 +7527,11 @@ class MimeNode {
                 address.address = this._normalizeAddress(address.address);
 
                 if (!address.name) {
-                    values.push(address.address.indexOf(' ') >= 0 ? `<${address.address}>` : `${address.address}`);
+                    // an address that carries a special, be it a quoted local part or a domain
+                    // that could not be normalized, is only unambiguous inside angle brackets.
+                    // Without them a ',' or a ';' anywhere in it reads as a recipient separator
+                    // and the header would list more recipients than the envelope carries
+                    values.push(PLAIN_ADDRESS.test(address.address) ? address.address : `<${address.address}>`);
                 } else {
                     values.push(`${this._encodeAddressName(address.name)} <${address.address}>`);
                 }
@@ -7378,19 +7557,26 @@ class MimeNode {
     _normalizeAddress(address) {
         address = (address || '')
             .toString()
-            .replace(/[\x00-\x1F<>]+/g, ' ') // remove unallowed characters
+            .replace(/[\x00-\x1F\x7F<>]+/g, ' ') // remove unallowed characters
             .trim();
 
-        const lastAt = address.lastIndexOf('@');
-        if (lastAt < 0) {
-            // Bare username
+        if (!address) {
+            // callers use an empty value to detect a missing address
             return address;
         }
 
-        let user = address.substr(0, lastAt);
+        const lastAt = address.lastIndexOf('@');
+        if (lastAt < 0) {
+            // Bare username, there is no domain to split off
+            return this._normalizeLocalPart(address);
+        }
+
+        const user = address.substr(0, lastAt);
         const domain = address.substr(lastAt + 1);
 
-        // Usernames are not touched and are kept as is even if these include unicode.
+        // Unicode in the local part is kept as is, see _normalizeLocalPart for the rest of it.
+        // A domain has no quoting construct to fall back on, so whatever is not a valid domain
+        // is kept as supplied and it is _convertAddresses that keeps such an address unambiguous.
         // Domains are punycoded when the local part is ASCII ('safe@jõgeva.ee' -> 'safe@xn--jgeva-dua.ee').
         // When the local part contains non-ASCII bytes the address already requires SMTPUTF8,
         // so the domain is kept (or decoded back) as UTF-8 for symmetry on both sides of '@'.
@@ -7407,16 +7593,27 @@ class MimeNode {
             // keep domain as supplied
         }
 
-        if (user.indexOf(' ') >= 0) {
-            if (user.charAt(0) !== '"') {
-                user = '"' + user;
-            }
-            if (user.substr(-1) !== '"') {
-                user = user + '"';
-            }
+        return `${this._normalizeLocalPart(user)}@${encodedDomain}`;
+    }
+
+    /**
+     * Normalizes the local part of an address into a form that can be emitted as is.
+     *
+     * A local part is either a dot-atom or a quoted-string, anything else is not a valid
+     * addr-spec. The quotes of a quoted local part get lost along the way, and a bare
+     * 'user@evil.com@good.com' leaves it to the receiver which '@' splits the domain off,
+     * while the split here is always at the last one. So whatever is not already one of
+     * the two valid forms goes back out as a quoted-string.
+     *
+     * @param {String} user Local part of an address
+     * @return {String} Local part as a dot-atom or as a quoted-string
+     */
+    _normalizeLocalPart(user) {
+        if (DOT_ATOM.test(user) || QUOTED_STRING.test(user)) {
+            return user;
         }
 
-        return `${user}@${encodedDomain}`;
+        return mimeFuncs.quoteString(user);
     }
 
     /**
@@ -7428,12 +7625,27 @@ class MimeNode {
     _encodeAddressName(name) {
         if (!/^[\w ]*$/.test(name)) {
             if (/^[\x20-\x7e]*$/.test(name)) {
-                return '"' + name.replace(/([\\"])/g, '\\$1') + '"';
+                return mimeFuncs.quoteString(name);
             } else {
                 return mimeFuncs.encodeWord(name, this._getTextEncoding(name), 52);
             }
         }
         return name;
+    }
+
+    /**
+     * Encodes an unstructured header value. Such a value can only carry VCHAR and WSP, so a
+     * control char or DEL has to be forced into the mime encoded word that a non-ascii value
+     * would get anyway. HT stays as it is, it is valid folding whitespace here.
+     *
+     * @param {String} value Header value to encode
+     * @returns {String} Mime word encoded string if needed
+     */
+    _encodeHeaderText(value) {
+        return /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value)
+            ? mimeFuncs.encodeWord(value, this._getTextEncoding(value), 52)
+            : // encodeWords only encodes if needed, otherwise the original string is returned
+              this._encodeWords(value);
     }
 
     /**
@@ -8080,7 +8292,7 @@ const decode = function (input) {
     // Main decoding loop: start just after the last delimiter if any basic code
     // points were copied; start at the beginning otherwise.
 
-    for (let index = basic > 0 ? basic + 1 : 0; index < inputLength /* no final expression */; ) {
+    for (let index = basic > 0 ? basic + 1 : 0; index < inputLength /* no final expression */;) {
         // `index` is the index of the next character to be consumed.
         // Decode a generalized variable-length integer into `delta`,
         // which gets added to `i`. The overflow checking is easier
@@ -8596,14 +8808,17 @@ class SendmailTransport {
         // Sendmail strips this header line by itself
         mail.message.keepBcc = true;
 
-        const envelope = mail.data.envelope || mail.message.getEnvelope();
+        const envelope = mail.message.getEnvelope();
         const messageId = mail.message.messageId();
         let returned;
 
         const hasInvalidAddresses = []
             .concat(envelope.from || [])
             .concat(envelope.to || [])
-            .some(addr => /^-/.test(addr));
+            // a local part is either a dot-atom or a quoted-string, so a leading dash sits at
+            // offset 0 or, behind the opening quote, at offset 1. Only the first shape is read
+            // as an option by sendmail, but both are the address this guard keeps out of argv
+            .some(addr => /^"?-/.test(addr));
         if (hasInvalidAddresses) {
             const err = new Error('Can not send mail. Invalid envelope addresses.');
             err.code = errors.ESENDMAIL;
@@ -8824,7 +9039,7 @@ class SESTransport extends EventEmitter {
             fromHeader = mimeNode._convertAddresses(mimeNode._parseAddresses(fromHeader.value));
         }
 
-        const envelope = mail.data.envelope || mail.message.getEnvelope();
+        const envelope = mail.message.getEnvelope();
         const messageId = mail.message.messageId();
 
         const recipients = [].concat(envelope.to || []);
@@ -13632,7 +13847,7 @@ class StreamTransport {
         // We probably need this in the output
         mail.message.keepBcc = true;
 
-        const envelope = mail.data.envelope || mail.message.getEnvelope();
+        const envelope = mail.message.getEnvelope();
         const messageId = mail.message.messageId();
 
         const recipients = [].concat(envelope.to || []);
@@ -42506,14 +42721,14 @@ module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("zlib");
 /***/ 4105:
 /***/ ((module) => {
 
-module.exports = /*#__PURE__*/JSON.parse('{"126":{"description":"126 Mail (NetEase)","host":"smtp.126.com","port":465,"secure":true},"163":{"description":"163 Mail (NetEase)","host":"smtp.163.com","port":465,"secure":true},"1und1":{"description":"1&1 Mail (German hosting provider)","host":"smtp.1und1.de","port":465,"secure":true,"authMethod":"LOGIN"},"Aliyun":{"description":"Alibaba Cloud Mail","domains":["aliyun.com"],"host":"smtp.aliyun.com","port":465,"secure":true},"AliyunQiye":{"description":"Alibaba Cloud Enterprise Mail","host":"smtp.qiye.aliyun.com","port":465,"secure":true},"AOL":{"description":"AOL Mail","domains":["aol.com"],"host":"smtp.aol.com","port":587},"Aruba":{"description":"Aruba PEC (Italian email provider)","domains":["aruba.it","pec.aruba.it"],"aliases":["Aruba PEC"],"host":"smtps.aruba.it","port":465,"secure":true,"authMethod":"LOGIN"},"Bluewin":{"description":"Bluewin (Swiss email provider)","host":"smtpauths.bluewin.ch","domains":["bluewin.ch"],"port":465},"BOL":{"description":"BOL Mail (Brazilian provider)","domains":["bol.com.br"],"host":"smtp.bol.com.br","port":587,"requireTLS":true},"DebugMail":{"description":"DebugMail (email testing service)","host":"debugmail.io","port":25},"Disroot":{"description":"Disroot (privacy-focused provider)","domains":["disroot.org"],"host":"disroot.org","port":587,"secure":false,"authMethod":"LOGIN"},"DynectEmail":{"description":"Dyn Email Delivery","aliases":["Dynect"],"host":"smtp.dynect.net","port":25},"ElasticEmail":{"description":"Elastic Email","aliases":["Elastic Email"],"host":"smtp.elasticemail.com","port":465,"secure":true},"Ethereal":{"description":"Ethereal Email (email testing service)","aliases":["ethereal.email"],"host":"smtp.ethereal.email","port":587},"FastMail":{"description":"FastMail","domains":["fastmail.fm"],"host":"smtp.fastmail.com","port":465,"secure":true},"Feishu Mail":{"description":"Feishu Mail (Lark)","aliases":["Feishu","FeishuMail"],"domains":["www.feishu.cn"],"host":"smtp.feishu.cn","port":465,"secure":true},"Forward Email":{"description":"Forward Email (email forwarding service)","aliases":["FE","ForwardEmail"],"domains":["forwardemail.net"],"host":"smtp.forwardemail.net","port":465,"secure":true},"GandiMail":{"description":"Gandi Mail","aliases":["Gandi","Gandi Mail"],"host":"mail.gandi.net","port":587},"Gmail":{"description":"Gmail","aliases":["Google Mail"],"domains":["gmail.com","googlemail.com"],"host":"smtp.gmail.com","port":465,"secure":true},"GmailWorkspace":{"description":"Gmail Workspace","aliases":["Google Workspace Mail"],"host":"smtp-relay.gmail.com","port":465,"secure":true},"GMX":{"description":"GMX Mail","domains":["gmx.com","gmx.net","gmx.de"],"host":"mail.gmx.com","port":587},"Godaddy":{"description":"GoDaddy Email (US)","host":"smtpout.secureserver.net","port":25},"GodaddyAsia":{"description":"GoDaddy Email (Asia)","host":"smtp.asia.secureserver.net","port":25},"GodaddyEurope":{"description":"GoDaddy Email (Europe)","host":"smtp.europe.secureserver.net","port":25},"hot.ee":{"description":"Hot.ee (Estonian email provider)","host":"mail.hot.ee"},"Hotmail":{"description":"Outlook.com / Hotmail","aliases":["Outlook","Outlook.com","Hotmail.com"],"domains":["hotmail.com","outlook.com"],"host":"smtp-mail.outlook.com","port":587},"iCloud":{"description":"iCloud Mail","aliases":["Me","Mac"],"domains":["me.com","mac.com"],"host":"smtp.mail.me.com","port":587},"Infomaniak":{"description":"Infomaniak Mail (Swiss hosting provider)","host":"mail.infomaniak.com","domains":["ik.me","ikmail.com","etik.com"],"port":587},"KolabNow":{"description":"KolabNow (secure email service)","domains":["kolabnow.com"],"aliases":["Kolab"],"host":"smtp.kolabnow.com","port":465,"secure":true,"authMethod":"LOGIN"},"Loopia":{"description":"Loopia (Swedish hosting provider)","host":"mailcluster.loopia.se","port":465},"Loops":{"description":"Loops","host":"smtp.loops.so","port":587},"mail.ee":{"description":"Mail.ee (Estonian email provider)","host":"smtp.mail.ee"},"Mail.ru":{"description":"Mail.ru","host":"smtp.mail.ru","port":465,"secure":true},"Mailcatch.app":{"description":"Mailcatch (email testing service)","host":"sandbox-smtp.mailcatch.app","port":2525},"Maildev":{"description":"MailDev (local email testing)","port":1025,"ignoreTLS":true},"MailerSend":{"description":"MailerSend","host":"smtp.mailersend.net","port":587},"Mailgun":{"description":"Mailgun","host":"smtp.mailgun.org","port":465,"secure":true},"Mailjet":{"description":"Mailjet","host":"in.mailjet.com","port":587},"Mailosaur":{"description":"Mailosaur (email testing service)","host":"mailosaur.io","port":25},"Mailtrap":{"description":"Mailtrap","host":"live.smtp.mailtrap.io","port":587},"Mandrill":{"description":"Mandrill (by Mailchimp)","host":"smtp.mandrillapp.com","port":587},"Naver":{"description":"Naver Mail (Korean email provider)","host":"smtp.naver.com","port":587},"OhMySMTP":{"description":"OhMySMTP (email delivery service)","host":"smtp.ohmysmtp.com","port":587,"secure":false},"One":{"description":"One.com Email","host":"send.one.com","port":465,"secure":true},"OpenMailBox":{"description":"OpenMailBox","aliases":["OMB","openmailbox.org"],"host":"smtp.openmailbox.org","port":465,"secure":true},"Outlook365":{"description":"Microsoft 365 / Office 365","host":"smtp.office365.com","port":587,"secure":false},"Postmark":{"description":"Postmark","aliases":["PostmarkApp"],"host":"smtp.postmarkapp.com","port":2525},"Proton":{"description":"Proton Mail","aliases":["ProtonMail","Proton.me","Protonmail.com","Protonmail.ch"],"domains":["proton.me","protonmail.com","pm.me","protonmail.ch"],"host":"smtp.protonmail.ch","port":587,"requireTLS":true},"qiye.aliyun":{"description":"Alibaba Mail Enterprise Edition","host":"smtp.mxhichina.com","port":"465","secure":true},"QQ":{"description":"QQ Mail","domains":["qq.com"],"host":"smtp.qq.com","port":465,"secure":true},"QQex":{"description":"QQ Enterprise Mail","aliases":["QQ Enterprise"],"domains":["exmail.qq.com"],"host":"smtp.exmail.qq.com","port":465,"secure":true},"Resend":{"description":"Resend","host":"smtp.resend.com","port":465,"secure":true},"Runbox":{"description":"Runbox (Norwegian email provider)","domains":["runbox.com"],"host":"smtp.runbox.com","port":465,"secure":true},"SendCloud":{"description":"SendCloud (Chinese email delivery)","host":"smtp.sendcloud.net","port":2525},"SendGrid":{"description":"SendGrid","host":"smtp.sendgrid.net","port":587},"SendinBlue":{"description":"Brevo (formerly Sendinblue)","aliases":["Brevo"],"host":"smtp-relay.brevo.com","port":587},"SendPulse":{"description":"SendPulse","host":"smtp-pulse.com","port":465,"secure":true},"SES":{"description":"AWS SES US East (N. Virginia)","host":"email-smtp.us-east-1.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-1":{"description":"AWS SES Asia Pacific (Tokyo)","host":"email-smtp.ap-northeast-1.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-2":{"description":"AWS SES Asia Pacific (Seoul)","host":"email-smtp.ap-northeast-2.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-3":{"description":"AWS SES Asia Pacific (Osaka)","host":"email-smtp.ap-northeast-3.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTH-1":{"description":"AWS SES Asia Pacific (Mumbai)","host":"email-smtp.ap-south-1.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTHEAST-1":{"description":"AWS SES Asia Pacific (Singapore)","host":"email-smtp.ap-southeast-1.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTHEAST-2":{"description":"AWS SES Asia Pacific (Sydney)","host":"email-smtp.ap-southeast-2.amazonaws.com","port":465,"secure":true},"SES-CA-CENTRAL-1":{"description":"AWS SES Canada (Central)","host":"email-smtp.ca-central-1.amazonaws.com","port":465,"secure":true},"SES-EU-CENTRAL-1":{"description":"AWS SES Europe (Frankfurt)","host":"email-smtp.eu-central-1.amazonaws.com","port":465,"secure":true},"SES-EU-NORTH-1":{"description":"AWS SES Europe (Stockholm)","host":"email-smtp.eu-north-1.amazonaws.com","port":465,"secure":true},"SES-EU-WEST-1":{"description":"AWS SES Europe (Ireland)","host":"email-smtp.eu-west-1.amazonaws.com","port":465,"secure":true},"SES-EU-WEST-2":{"description":"AWS SES Europe (London)","host":"email-smtp.eu-west-2.amazonaws.com","port":465,"secure":true},"SES-EU-WEST-3":{"description":"AWS SES Europe (Paris)","host":"email-smtp.eu-west-3.amazonaws.com","port":465,"secure":true},"SES-SA-EAST-1":{"description":"AWS SES South America (São Paulo)","host":"email-smtp.sa-east-1.amazonaws.com","port":465,"secure":true},"SES-US-EAST-1":{"description":"AWS SES US East (N. Virginia)","host":"email-smtp.us-east-1.amazonaws.com","port":465,"secure":true},"SES-US-EAST-2":{"description":"AWS SES US East (Ohio)","host":"email-smtp.us-east-2.amazonaws.com","port":465,"secure":true},"SES-US-GOV-EAST-1":{"description":"AWS SES GovCloud (US-East)","host":"email-smtp.us-gov-east-1.amazonaws.com","port":465,"secure":true},"SES-US-GOV-WEST-1":{"description":"AWS SES GovCloud (US-West)","host":"email-smtp.us-gov-west-1.amazonaws.com","port":465,"secure":true},"SES-US-WEST-1":{"description":"AWS SES US West (N. California)","host":"email-smtp.us-west-1.amazonaws.com","port":465,"secure":true},"SES-US-WEST-2":{"description":"AWS SES US West (Oregon)","host":"email-smtp.us-west-2.amazonaws.com","port":465,"secure":true},"Seznam":{"description":"Seznam Email (Czech email provider)","aliases":["Seznam Email"],"domains":["seznam.cz","email.cz","post.cz","spoluzaci.cz"],"host":"smtp.seznam.cz","port":465,"secure":true},"SMTP2GO":{"description":"SMTP2GO","host":"mail.smtp2go.com","port":2525},"Sparkpost":{"description":"SparkPost","aliases":["SparkPost","SparkPost Mail"],"domains":["sparkpost.com"],"host":"smtp.sparkpostmail.com","port":587,"secure":false},"Tipimail":{"description":"Tipimail (email delivery service)","host":"smtp.tipimail.com","port":587},"Tutanota":{"description":"Tutanota (Tuta Mail)","domains":["tutanota.com","tuta.com","tutanota.de","tuta.io"],"host":"smtp.tutanota.com","port":465,"secure":true},"Yahoo":{"description":"Yahoo Mail","domains":["yahoo.com"],"host":"smtp.mail.yahoo.com","port":465,"secure":true},"Yandex":{"description":"Yandex Mail","domains":["yandex.ru"],"host":"smtp.yandex.ru","port":465,"secure":true},"Zimbra":{"description":"Zimbra Mail Server","aliases":["Zimbra Collaboration"],"host":"smtp.zimbra.com","port":587,"requireTLS":true},"Zoho":{"description":"Zoho Mail","host":"smtp.zoho.com","port":465,"secure":true,"authMethod":"LOGIN"}}');
+module.exports = /*#__PURE__*/JSON.parse('{"126":{"description":"126 Mail (NetEase)","host":"smtp.126.com","port":465,"secure":true},"163":{"description":"163 Mail (NetEase)","host":"smtp.163.com","port":465,"secure":true},"1und1":{"description":"1&1 Mail (German hosting provider)","host":"smtp.1und1.de","port":465,"secure":true,"authMethod":"LOGIN"},"Aliyun":{"description":"Alibaba Cloud Mail","domains":["aliyun.com"],"host":"smtp.aliyun.com","port":465,"secure":true},"AliyunQiye":{"description":"Alibaba Cloud Enterprise Mail","host":"smtp.qiye.aliyun.com","port":465,"secure":true},"AOL":{"description":"AOL Mail","domains":["aol.com"],"host":"smtp.aol.com","port":587},"Aruba":{"description":"Aruba PEC (Italian email provider)","domains":["aruba.it","pec.aruba.it"],"aliases":["Aruba PEC"],"host":"smtps.aruba.it","port":465,"secure":true,"authMethod":"LOGIN"},"Bluewin":{"description":"Bluewin (Swiss email provider)","host":"smtpauths.bluewin.ch","domains":["bluewin.ch"],"port":465},"BOL":{"description":"BOL Mail (Brazilian provider)","domains":["bol.com.br"],"host":"smtp.bol.com.br","port":587,"requireTLS":true},"DebugMail":{"description":"DebugMail (email testing service)","host":"debugmail.io","port":25},"Disroot":{"description":"Disroot (privacy-focused provider)","domains":["disroot.org"],"host":"disroot.org","port":587,"secure":false,"authMethod":"LOGIN"},"DynectEmail":{"description":"Dyn Email Delivery","aliases":["Dynect"],"host":"smtp.dynect.net","port":25},"ElasticEmail":{"description":"Elastic Email","aliases":["Elastic Email"],"host":"smtp.elasticemail.com","port":465,"secure":true},"Ethereal":{"description":"Ethereal Email (email testing service)","aliases":["ethereal.email"],"host":"smtp.ethereal.email","port":587},"FastMail":{"description":"FastMail","domains":["fastmail.fm"],"host":"smtp.fastmail.com","port":465,"secure":true},"Feishu Mail":{"description":"Feishu Mail (Lark)","aliases":["Feishu","FeishuMail"],"domains":["www.feishu.cn"],"host":"smtp.feishu.cn","port":465,"secure":true},"Forward Email":{"description":"Forward Email (email forwarding service)","aliases":["FE","ForwardEmail"],"domains":["forwardemail.net"],"host":"smtp.forwardemail.net","port":465,"secure":true},"GandiMail":{"description":"Gandi Mail","aliases":["Gandi","Gandi Mail"],"host":"mail.gandi.net","port":587},"Gmail":{"description":"Gmail","aliases":["Google Mail"],"domains":["gmail.com","googlemail.com"],"host":"smtp.gmail.com","port":465,"secure":true},"GmailWorkspace":{"description":"Gmail Workspace","aliases":["Google Workspace Mail"],"host":"smtp-relay.gmail.com","port":465,"secure":true},"GMX":{"description":"GMX Mail","domains":["gmx.com","gmx.net","gmx.de"],"host":"mail.gmx.com","port":587},"Godaddy":{"description":"GoDaddy Email (US)","host":"smtpout.secureserver.net","port":25},"GodaddyAsia":{"description":"GoDaddy Email (Asia)","host":"smtp.asia.secureserver.net","port":25},"GodaddyEurope":{"description":"GoDaddy Email (Europe)","host":"smtp.europe.secureserver.net","port":25},"hot.ee":{"description":"Hot.ee (Estonian email provider)","host":"mail.hot.ee"},"Hotmail":{"description":"Outlook.com / Hotmail","aliases":["Outlook","Outlook.com","Hotmail.com"],"domains":["hotmail.com","outlook.com"],"host":"smtp-mail.outlook.com","port":587},"iCloud":{"description":"iCloud Mail","aliases":["Me","Mac"],"domains":["me.com","mac.com"],"host":"smtp.mail.me.com","port":587},"Infomaniak":{"description":"Infomaniak Mail (Swiss hosting provider)","host":"mail.infomaniak.com","domains":["ik.me","ikmail.com","etik.com"],"port":587},"KolabNow":{"description":"KolabNow (secure email service)","domains":["kolabnow.com"],"aliases":["Kolab"],"host":"smtp.kolabnow.com","port":465,"secure":true,"authMethod":"LOGIN"},"Loopia":{"description":"Loopia (Swedish hosting provider)","host":"mailcluster.loopia.se","port":465},"Loops":{"description":"Loops","host":"smtp.loops.so","port":587},"mail.ee":{"description":"Mail.ee (Estonian email provider)","host":"smtp.mail.ee"},"Mail.ru":{"description":"Mail.ru","host":"smtp.mail.ru","port":465,"secure":true},"Mailcatch.app":{"description":"Mailcatch (email testing service)","host":"sandbox-smtp.mailcatch.app","port":2525},"Maildev":{"description":"MailDev (local email testing)","port":1025,"ignoreTLS":true},"MailerSend":{"description":"MailerSend","host":"smtp.mailersend.net","port":587},"Mailgun":{"description":"Mailgun","host":"smtp.mailgun.org","port":465,"secure":true},"Mailjet":{"description":"Mailjet","host":"in.mailjet.com","port":587},"Mailosaur":{"description":"Mailosaur (email testing service)","host":"mailosaur.io","port":25},"Mailtrap":{"description":"Mailtrap","host":"live.smtp.mailtrap.io","port":587},"Mandrill":{"description":"Mandrill (by Mailchimp)","host":"smtp.mandrillapp.com","port":587},"Naver":{"description":"Naver Mail (Korean email provider)","host":"smtp.naver.com","port":587},"OhMySMTP":{"description":"OhMySMTP (email delivery service)","host":"smtp.ohmysmtp.com","port":587,"secure":false},"One":{"description":"One.com Email","host":"send.one.com","port":465,"secure":true},"OpenMailBox":{"description":"OpenMailBox","aliases":["OMB","openmailbox.org"],"host":"smtp.openmailbox.org","port":465,"secure":true},"Outlook365":{"description":"Microsoft 365 / Office 365","host":"smtp.office365.com","port":587,"secure":false},"Postmark":{"description":"Postmark","aliases":["PostmarkApp"],"host":"smtp.postmarkapp.com","port":2525},"Proton":{"description":"Proton Mail","aliases":["ProtonMail","Proton.me","Protonmail.com","Protonmail.ch"],"domains":["proton.me","protonmail.com","pm.me","protonmail.ch"],"host":"smtp.protonmail.ch","port":587,"requireTLS":true},"qiye.aliyun":{"description":"Alibaba Mail Enterprise Edition","host":"smtp.mxhichina.com","port":"465","secure":true},"QQ":{"description":"QQ Mail","domains":["qq.com"],"host":"smtp.qq.com","port":465,"secure":true},"QQex":{"description":"QQ Enterprise Mail","aliases":["QQ Enterprise"],"domains":["exmail.qq.com"],"host":"smtp.exmail.qq.com","port":465,"secure":true},"Resend":{"description":"Resend","host":"smtp.resend.com","port":465,"secure":true},"Runbox":{"description":"Runbox (Norwegian email provider)","domains":["runbox.com"],"host":"smtp.runbox.com","port":465,"secure":true},"SendCloud":{"description":"SendCloud (Chinese email delivery)","host":"smtp.sendcloud.net","port":2525},"SendGrid":{"description":"SendGrid","host":"smtp.sendgrid.net","port":587},"SendinBlue":{"description":"Brevo (formerly Sendinblue)","aliases":["Brevo"],"host":"smtp-relay.brevo.com","port":587},"SendPulse":{"description":"SendPulse","host":"smtp-pulse.com","port":465,"secure":true},"SES":{"description":"AWS SES US East (N. Virginia)","host":"email-smtp.us-east-1.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-1":{"description":"AWS SES Asia Pacific (Tokyo)","host":"email-smtp.ap-northeast-1.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-2":{"description":"AWS SES Asia Pacific (Seoul)","host":"email-smtp.ap-northeast-2.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-3":{"description":"AWS SES Asia Pacific (Osaka)","host":"email-smtp.ap-northeast-3.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTH-1":{"description":"AWS SES Asia Pacific (Mumbai)","host":"email-smtp.ap-south-1.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTHEAST-1":{"description":"AWS SES Asia Pacific (Singapore)","host":"email-smtp.ap-southeast-1.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTHEAST-2":{"description":"AWS SES Asia Pacific (Sydney)","host":"email-smtp.ap-southeast-2.amazonaws.com","port":465,"secure":true},"SES-CA-CENTRAL-1":{"description":"AWS SES Canada (Central)","host":"email-smtp.ca-central-1.amazonaws.com","port":465,"secure":true},"SES-EU-CENTRAL-1":{"description":"AWS SES Europe (Frankfurt)","host":"email-smtp.eu-central-1.amazonaws.com","port":465,"secure":true},"SES-EU-NORTH-1":{"description":"AWS SES Europe (Stockholm)","host":"email-smtp.eu-north-1.amazonaws.com","port":465,"secure":true},"SES-EU-WEST-1":{"description":"AWS SES Europe (Ireland)","host":"email-smtp.eu-west-1.amazonaws.com","port":465,"secure":true},"SES-EU-WEST-2":{"description":"AWS SES Europe (London)","host":"email-smtp.eu-west-2.amazonaws.com","port":465,"secure":true},"SES-EU-WEST-3":{"description":"AWS SES Europe (Paris)","host":"email-smtp.eu-west-3.amazonaws.com","port":465,"secure":true},"SES-SA-EAST-1":{"description":"AWS SES South America (São Paulo)","host":"email-smtp.sa-east-1.amazonaws.com","port":465,"secure":true},"SES-US-EAST-1":{"description":"AWS SES US East (N. Virginia)","host":"email-smtp.us-east-1.amazonaws.com","port":465,"secure":true},"SES-US-EAST-2":{"description":"AWS SES US East (Ohio)","host":"email-smtp.us-east-2.amazonaws.com","port":465,"secure":true},"SES-US-GOV-EAST-1":{"description":"AWS SES GovCloud (US-East)","host":"email-smtp.us-gov-east-1.amazonaws.com","port":465,"secure":true},"SES-US-GOV-WEST-1":{"description":"AWS SES GovCloud (US-West)","host":"email-smtp.us-gov-west-1.amazonaws.com","port":465,"secure":true},"SES-US-WEST-1":{"description":"AWS SES US West (N. California)","host":"email-smtp.us-west-1.amazonaws.com","port":465,"secure":true},"SES-US-WEST-2":{"description":"AWS SES US West (Oregon)","host":"email-smtp.us-west-2.amazonaws.com","port":465,"secure":true},"Seznam":{"description":"Seznam Email (Czech email provider)","aliases":["Seznam Email"],"domains":["seznam.cz","email.cz","post.cz","spoluzaci.cz"],"host":"smtp.seznam.cz","port":465,"secure":true},"SMTP2GO":{"description":"SMTP2GO","host":"mail.smtp2go.com","port":2525},"Sparkpost":{"description":"SparkPost","aliases":["SparkPost","SparkPost Mail"],"domains":["sparkpost.com"],"host":"smtp.sparkpostmail.com","port":587,"secure":false},"Tipimail":{"description":"Tipimail (email delivery service)","host":"smtp.tipimail.com","port":587},"TurboSMTP":{"description":"TurboSMTP","host":"pro.turbo-smtp.com","port":465,"secure":true},"TurboSMTP-EU":{"description":"TurboSMTP (EU region)","host":"pro.eu.turbo-smtp.com","port":465,"secure":true},"Tutanota":{"description":"Tutanota (Tuta Mail)","domains":["tutanota.com","tuta.com","tutanota.de","tuta.io"],"host":"smtp.tutanota.com","port":465,"secure":true},"Yahoo":{"description":"Yahoo Mail","domains":["yahoo.com"],"host":"smtp.mail.yahoo.com","port":465,"secure":true},"Yandex":{"description":"Yandex Mail","domains":["yandex.ru"],"host":"smtp.yandex.ru","port":465,"secure":true},"Zimbra":{"description":"Zimbra Mail Server","aliases":["Zimbra Collaboration"],"host":"smtp.zimbra.com","port":587,"requireTLS":true},"Zoho":{"description":"Zoho Mail","host":"smtp.zoho.com","port":465,"secure":true,"authMethod":"LOGIN"}}');
 
 /***/ }),
 
 /***/ 6710:
 /***/ ((module) => {
 
-module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"9.0.3","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","test:coverage":"c8 node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","format":"prettier --write \\"**/*.{js,json,md}\\"","format:check":"prettier --check \\"**/*.{js,json,md}\\"","lint":"eslint .","lint:fix":"eslint . --fix","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install","test:syntax":"docker run --rm -v \\"$PWD:/app:ro\\" -w /app node:6-alpine node test/syntax-compat.js"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-sesv2":"3.1068.0","bunyan":"1.8.15","c8":"11.0.0","eslint":"10.5.0","eslint-config-prettier":"10.1.8","globals":"17.6.0","libbase64":"1.3.0","libmime":"5.3.8","libqp":"2.1.1","prettier":"3.8.4","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.19.0"},"engines":{"node":">=6.0.0"}}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"9.0.5","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","test:coverage":"c8 node --test --test-concurrency=1 $(find test \\\\( -name \'*-test.js\' -o -name \'*.test.js\' \\\\))","format":"prettier --write \\"**/*.{js,json,md}\\"","format:check":"prettier --check \\"**/*.{js,json,md}\\"","lint":"eslint .","lint:fix":"eslint . --fix","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install","test:syntax":"docker run --rm -v \\"$PWD:/app:ro\\" -w /app node:6-alpine node test/syntax-compat.js"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-sesv2":"3.1104.0","bunyan":"1.8.15","c8":"12.0.0","eslint":"10.8.0","eslint-config-prettier":"10.1.8","globals":"17.9.0","libbase64":"1.3.0","libmime":"5.4.1","libqp":"2.1.1","prettier":"3.9.6","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.19.2"},"engines":{"node":">=6.0.0"}}');
 
 /***/ })
 
